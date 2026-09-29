@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CultJob } from "../src/state.js";
-import { evaluateDelivery, evaluateReviewDelivery } from "../src/verify.js";
+import { evaluateDelivery, evaluateReviewDelivery, verdictIsClean } from "../src/verify.js";
 
 const job: CultJob = {
   issueNumber: 42,
@@ -177,7 +177,12 @@ describe("evaluateReviewDelivery", () => {
     updatedAt: "2026-08-26T12:00:00.000Z"
   };
 
-  it("verifies a blocked review at the declared commit", () => {
+  // The verdict is the reviewer's conclusion about the pull request, not a
+  // statement about the review itself. A review that concludes "blocked" did
+  // its job and gets paid, so it passes verification. This assertion is the
+  // only place that decision was recorded; verdictIsClean and the CLI now say
+  // it out loud as well.
+  it("passes a blocked review: the verdict is not a verification failure", () => {
     const result = evaluateReviewDelivery(reviewJob, {
       number: 47,
       url: "https://github.com/thecultos/example/pull/47",
@@ -202,5 +207,56 @@ describe("evaluateReviewDelivery", () => {
 
     expect(result.passed).toBe(false);
     expect(result.failures).toContain("Pull request changed after review");
+  });
+});
+
+describe("what verification reports but cannot decide", () => {
+  const passingPullRequest = {
+    number: 47,
+    url: "https://github.com/thecultos/example/pull/47",
+    state: "OPEN",
+    headSha: "abc123456789",
+    baseRef: "main"
+  };
+  const passingChecks = [{ name: "test", state: "SUCCESS", bucket: "pass" }];
+
+  it("carries the agreed criteria through to the result", () => {
+    const result = evaluateDelivery(job, passingPullRequest, passingChecks);
+
+    expect(result.acceptanceCriteria).toEqual(["Tests pass"]);
+  });
+
+  it("does not let the criteria change the outcome", () => {
+    // They are free text from the issue, so CultOS reports them for a human to
+    // read and never decides them. Verification has to stay deterministic.
+    const withMany: CultJob = {
+      ...job,
+      contract: {
+        ...job.contract,
+        kind: "cultos.github.issue.v1",
+        acceptanceCriteria: ["Tests pass", "Docs updated", "Nothing was actually done"]
+      } as CultJob["contract"]
+    };
+
+    const result = evaluateDelivery(withMany, passingPullRequest, passingChecks);
+
+    expect(result.passed).toBe(true);
+    expect(result.acceptanceCriteria).toHaveLength(3);
+  });
+
+  it("reports an empty list rather than omitting it", () => {
+    const withNone: CultJob = {
+      ...job,
+      contract: { ...job.contract, acceptanceCriteria: [] } as CultJob["contract"]
+    };
+
+    expect(evaluateDelivery(withNone, passingPullRequest, passingChecks).acceptanceCriteria)
+      .toEqual([]);
+  });
+
+  it("treats only approve-ready as a clean verdict", () => {
+    expect(verdictIsClean("approve-ready")).toBe(true);
+    expect(verdictIsClean("discussion-needed")).toBe(false);
+    expect(verdictIsClean("blocked")).toBe(false);
   });
 });
