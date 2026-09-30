@@ -4,14 +4,30 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { capUnits, explorer, findTransaction, listingStatus, runHandshake } from "../src/handshake.js";
+import { BASE_USDC, capUnits, confirmOnBase, explorer, findTransaction, listingStatus, runHandshake } from "../src/handshake.js";
 
 const payTo = "0x000000000000000000000000000000000000dEaD";
 const tx = `0x${"ab".repeat(32)}`;
+
+const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const buyerTopic = `0x${"0".repeat(24)}${"cd".repeat(20)}`;
+
+function receiptFetcher(result: unknown): typeof fetch {
+  return (async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  })) as typeof fetch;
+}
+
+const settledReceipt = {
+  status: "0x1",
+  logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, buyerTopic], data: "0x3e8" }]
+};
+
 const header = Buffer.from(JSON.stringify({
   x402Version: 2,
   accepts: [{ scheme: "exact", network: "eip155:8453", amount: "1000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo, maxTimeoutSeconds: 60 }],
-  extensions: { bazaar: { info: {} } }
+  extensions: { bazaar: { info: { input: { type: "object" }, output: { type: "object" } }, schema: {} } }
 })).toString("base64");
 
 const endpoint = "https://api.example.com/data";
@@ -108,7 +124,7 @@ describe("cult handshake", () => {
     const testnet = Buffer.from(JSON.stringify({
       x402Version: 2,
       accepts: [{ scheme: "exact", network: "eip155:84532", amount: "1000", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo, maxTimeoutSeconds: 60 }],
-      extensions: { bazaar: { info: {} } }
+      extensions: { bazaar: { info: { input: { type: "object" }, output: { type: "object" } }, schema: {} } }
     })).toString("base64");
     const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": testnet } })) as typeof fetch;
     expect(await runHandshake(endpoint, { confirm: async () => true, fetcher })).toBe(false);
@@ -154,10 +170,53 @@ describe("cult handshake", () => {
       chmodSync(join(directory, "npx"), 0o755);
       expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).toBe(false);
       writeFileSync(join(directory, "npx"), `#!/bin/sh\necho 'paid $0.001 · 1.9 load · tx ${tx}'\n`);
-      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).toBe(true);
+      expect(await runHandshake("mac/cpu/load", {
+        confirm: async () => true,
+        yes: true,
+        fetcher: receiptFetcher(settledReceipt)
+      })).toBe(true);
     } finally {
       if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
     }
+  });
+
+  it("refuses a machine sale that Base does not confirm", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    process.env.X402_MQTT_BUYER_KEY = "0x" + "1".repeat(64);
+    process.env.PATH = `${directory}:${previousPath}`;
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho 'paid $0.001 · 1.9 load · tx ${tx}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    try {
+      for (const result of [
+        null,
+        { status: "0x0", logs: [] },
+        { status: "0x1", logs: [] },
+        { status: "0x1", logs: [{ address: "0x" + "9".repeat(40), topics: [transferTopic, buyerTopic, buyerTopic], data: "0x3e8" }] }
+      ]) {
+        expect(await runHandshake("mac/cpu/load", {
+          confirm: async () => true,
+          yes: true,
+          fetcher: receiptFetcher(result)
+        })).toBe(false);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("reads the payer and amount out of the USDC transfer log", async () => {
+    const confirmed = await confirmOnBase(tx, receiptFetcher(settledReceipt));
+
+    expect(confirmed.settled).toBe(true);
+    expect(confirmed.amount).toBe("1000");
+    expect(confirmed.payer).toBe(`0x${"cd".repeat(20)}`);
+  });
+
+  it("refuses a broker or topic that the paying path should not accept", async () => {
+    await expect(runHandshake("mac/cpu/load", { broker: "mqtt://remote.example.com", confirm: async () => true }))
+      .rejects.toThrow(/mqtts:\/\/ or wss:\/\//);
+    await expect(runHandshake("--broker", { confirm: async () => true }))
+      .rejects.toThrow(/Invalid machine topic/);
   });
 
   it("asks for the buyer's own key for machines instead of holding one", async () => {

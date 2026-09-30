@@ -2,8 +2,8 @@ import { spawnSync } from "node:child_process";
 import pc from "picocolors";
 import { safe } from "./display.js";
 import { commandExists } from "./github.js";
-import { X402_MQTT_VERSION } from "./build.js";
-import { checkEndpoint, formatUsdc, isLocal, networkOf, passed, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
+import { validBroker, X402_MQTT_VERSION } from "./build.js";
+import { checkEndpoint, decodeBase64, formatUsdc, isLocal, networkOf, passed, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
 
 export const AWAL_VERSION = "2.12.1";
 export const DEFAULT_CAP = "0.01";
@@ -64,9 +64,9 @@ export function findTransaction(value: unknown): string | undefined {
 
 export function settlementOf(headers: Record<string, string> | undefined): { success?: boolean; transaction?: string; network?: string } | undefined {
   const value = headers && Object.entries(headers).find(([key]) => key.toLowerCase() === "payment-response")?.[1];
-  if (!value || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return undefined;
+  if (!value) return undefined;
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64").toString("utf8")) as { success?: unknown; transaction?: unknown; network?: unknown };
+    const parsed = JSON.parse(decodeBase64(value).toString("utf8")) as { success?: unknown; transaction?: unknown; network?: unknown };
     return {
       ...(typeof parsed.success === "boolean" ? { success: parsed.success } : {}),
       ...(typeof parsed.transaction === "string" ? { transaction: parsed.transaction } : {}),
@@ -110,6 +110,61 @@ function quote(value: string): string {
 function payCommand(url: string, method: string, data: string | undefined, cap: bigint): string {
   const body = data ? ` -d ${quote(data)}` : "";
   return `npx awal@${AWAL_VERSION} x402 pay ${quote(url)} -X ${quote(method)}${body} --max-amount ${cap} --scheme exact`;
+}
+
+export const BASE_RPC = "https://mainnet.base.org";
+export const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+export interface BaseReceipt {
+  settled: boolean;
+  reason?: string;
+  payer?: string;
+  amount?: string;
+}
+
+export async function confirmOnBase(
+  transaction: string,
+  fetcher: typeof fetch = fetch,
+  attempts = 5
+): Promise<BaseReceipt> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 2_000));
+    let receipt: { status?: unknown; logs?: unknown } | null | undefined;
+    try {
+      const response = await fetcher(BASE_RPC, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [transaction] }),
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (!response.ok) continue;
+      receipt = (await response.json() as { result?: { status?: unknown; logs?: unknown } | null }).result;
+    } catch {
+      continue;
+    }
+    if (!receipt) continue;
+    if (receipt.status !== "0x1") return { settled: false, reason: "the transaction reverted on Base" };
+
+    const logs = Array.isArray(receipt.logs) ? receipt.logs : [];
+    const transfer = logs.find((log) => {
+      const entry = log as { address?: unknown; topics?: unknown };
+      const topics = Array.isArray(entry.topics) ? entry.topics : [];
+      return typeof entry.address === "string"
+        && entry.address.toLowerCase() === BASE_USDC.toLowerCase()
+        && typeof topics[0] === "string"
+        && topics[0].toLowerCase() === transferTopic
+        && typeof topics[1] === "string";
+    }) as { topics?: string[]; data?: unknown } | undefined;
+
+    if (!transfer) return { settled: false, reason: "no USDC transfer in that transaction" };
+    const payer = `0x${transfer.topics![1]!.slice(-40)}`;
+    const amount = typeof transfer.data === "string" && /^0x[0-9a-fA-F]+$/.test(transfer.data)
+      ? BigInt(transfer.data).toString()
+      : undefined;
+    return { settled: true, payer, ...(amount !== undefined ? { amount } : {}) };
+  }
+  return { settled: false, reason: `no receipt on Base mainnet for ${transaction}` };
 }
 
 export async function ensureAwal(confirm: HandshakeOptions["confirm"]): Promise<boolean> {
@@ -212,6 +267,10 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   const broker = options.broker ?? "mqtt://127.0.0.1:1883";
   const max = options.max ?? DEFAULT_CAP;
   capUnits(max);
+  if (topic.startsWith("-")) throw new Error(`Invalid machine topic: ${topic}`);
+  if (!validBroker(broker)) {
+    throw new Error("a remote broker must use mqtts:// or wss://; plain mqtt:// or ws:// only on this machine");
+  }
   console.log(pc.bold("\nCULT OS // HANDSHAKE\n"));
   console.log(`${pc.dim("topic")}   ${topic}\n${pc.dim("broker")}  ${broker}\n${pc.dim("cap")}     ${max} USDC\n`);
   if (!process.env.X402_MQTT_BUYER_KEY) {
@@ -233,9 +292,17 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
     if (reason) console.log(pc.dim(`x402-mqtt: ${reason.slice(0, 300)}`));
     return false;
   }
+  console.log(pc.dim("Confirming the receipt on Base…"));
+  const receipt = await confirmOnBase(transaction, options.fetcher);
+  if (!receipt.settled) {
+    console.log(pc.red(`\nx402-mqtt reported a payment that Base does not confirm: ${safe(receipt.reason ?? "unknown")}.`));
+    console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction) ?? safe(transaction)}\n`);
+    return false;
+  }
   const paid = output.match(/paid \$[0-9.]+ · [^\n]*/)?.[0];
   console.log(pc.green("\nFirst sale done on Base"));
   if (paid) console.log(pc.dim(safe(paid).replace(/ · tx .*/, "")));
+  if (receipt.amount) console.log(`${pc.dim("settled")}  ${formatUsdc(receipt.amount)} USDC from ${safe(receipt.payer ?? "")}`);
   console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction)}\n`);
   return true;
 }

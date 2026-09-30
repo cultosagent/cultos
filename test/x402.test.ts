@@ -1,7 +1,11 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { checkEndpoint, decodePaymentRequired, formatUsdc, inspectAccept, passed } from "../src/x402.js";
+import { checkEndpoint, decodePaymentRequired, formatUsdc, inspectAccept, passed , type TokenAccountLookup } from "../src/x402.js";
+
+const neverCalled: TokenAccountLookup = async () => {
+  throw new Error("a test reached the real Solana RPC: inject tokenAccount");
+};
 
 const baseUsdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const payTo = "0x000000000000000000000000000000000000dEaD";
@@ -13,7 +17,7 @@ function header(value: unknown): string {
 const good = {
   x402Version: 2,
   accepts: [{ scheme: "exact", network: "eip155:8453", amount: "1000", asset: baseUsdc, payTo, maxTimeoutSeconds: 60 }],
-  extensions: { bazaar: { info: {} } }
+  extensions: { bazaar: { info: { input: { type: "object" }, output: { type: "object" } }, schema: {} } }
 };
 
 let server: Server;
@@ -58,31 +62,31 @@ afterAll(() => {
 
 describe("cult check", () => {
   it("passes a ready endpoint and notes plain http on localhost", async () => {
-    const result = await checkEndpoint(`${origin}/good`);
+    const result = await checkEndpoint(`${origin}/good`, { tokenAccount: neverCalled });
     expect(passed(result)).toBe(true);
     expect(result.findings.find((finding) => finding.label === "TLS")?.level).toBe("warn");
     expect(result.findings.some((finding) => finding.detail === "price 0.001 USDC")).toBe(true);
   });
 
   it("fails an asset that is not USDC", async () => {
-    const result = await checkEndpoint(`${origin}/wrong-asset`);
+    const result = await checkEndpoint(`${origin}/wrong-asset`, { tokenAccount: neverCalled });
     expect(passed(result)).toBe(false);
   });
 
   it("fails a network outside Base and Solana", async () => {
-    const result = await checkEndpoint(`${origin}/other-chain`);
+    const result = await checkEndpoint(`${origin}/other-chain`, { tokenAccount: neverCalled });
     expect(passed(result)).toBe(false);
   });
 
   it("fails an empty or null Bazaar field", async () => {
-    for (const bazaar of [null, {}, "yes", { info: null }]) {
+    for (const bazaar of [null, {}, "yes", { info: null }, { info: {} }, { info: { schema: {} } }]) {
       const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header({ ...good, extensions: { bazaar } }) } })) as typeof fetch;
       expect(passed(await checkEndpoint("https://api.example.com/data", { fetcher }))).toBe(false);
     }
   });
 
   it("fails without Bazaar metadata", async () => {
-    const result = await checkEndpoint(`${origin}/no-bazaar`);
+    const result = await checkEndpoint(`${origin}/no-bazaar`, { tokenAccount: neverCalled });
     expect(passed(result)).toBe(false);
     expect(result.findings.find((finding) => finding.label === "Bazaar")?.level).toBe("fail");
   });
@@ -93,12 +97,12 @@ describe("cult check", () => {
   });
 
   it("fails an unreadable payment header", async () => {
-    const result = await checkEndpoint(`${origin}/garbage`);
+    const result = await checkEndpoint(`${origin}/garbage`, { tokenAccount: neverCalled });
     expect(passed(result)).toBe(false);
   });
 
   it("fails an endpoint that does not ask for payment", async () => {
-    const result = await checkEndpoint(`${origin}/free`);
+    const result = await checkEndpoint(`${origin}/free`, { tokenAccount: neverCalled });
     expect(passed(result)).toBe(false);
     expect(result.status).toBe(200);
   });

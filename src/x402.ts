@@ -57,9 +57,19 @@ export function isLocal(url: URL): boolean {
   return url.hostname === "localhost" || url.hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
 }
 
+export function decodeBase64(value: string): Buffer {
+  if (!/^[A-Za-z0-9+/\-_]+={0,2}$/.test(value)) throw new Error("value is not base64");
+  return Buffer.from(value, "base64");
+}
+
 export function decodePaymentRequired(header: string): unknown {
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(header)) throw new Error("PAYMENT-REQUIRED header is not base64");
-  return JSON.parse(Buffer.from(header, "base64").toString("utf8"));
+  let decoded: Buffer;
+  try {
+    decoded = decodeBase64(header);
+  } catch {
+    throw new Error("PAYMENT-REQUIRED header is not base64");
+  }
+  return JSON.parse(decoded.toString("utf8"));
 }
 
 const base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -222,7 +232,11 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
     findings.push(...inspectAccept(accept));
     const network = networkOf(accept.network);
     if (accept.scheme === "exact" && network?.family === "solana" && validPayTo(network, accept.payTo) && sameAsset(network, accept.asset)) {
-      const exists = (await lookup(network, accept.payTo)) ?? (await lookup(network, accept.payTo));
+      let exists = await lookup(network, accept.payTo);
+      if (exists === undefined) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+        exists = await lookup(network, accept.payTo);
+      }
       findings.push(exists === true
         ? { level: "pass", label: network.name, detail: "payout has a USDC account" }
         : exists === false
@@ -230,11 +244,18 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
           : { level: "fail", label: network.name, detail: "could not reach Solana to confirm the payout has a USDC account: run it again" });
     }
   }
-  const bazaar = parsed.extensions?.bazaar as { info?: unknown } | null | undefined;
-  findings.push(bazaar && typeof bazaar === "object" && bazaar.info && typeof bazaar.info === "object"
+  findings.push(hasBazaarMetadata(parsed.extensions?.bazaar)
     ? { level: "pass", label: "Bazaar", detail: "discovery metadata present" }
     : { level: "fail", label: "Bazaar", detail: "no discovery metadata, so marketplaces cannot list it: add a bazaar extension (cult build x402 includes one)" });
   return { url: url.href, status: 402, paymentRequired: parsed, findings };
+}
+
+export function hasBazaarMetadata(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const info = (value as { info?: unknown }).info;
+  if (!info || typeof info !== "object") return false;
+  const described = info as { input?: unknown; output?: unknown };
+  return Boolean(described.input) || Boolean(described.output);
 }
 
 export function passed(result: CheckResult): boolean {
