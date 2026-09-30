@@ -14,6 +14,7 @@ export interface HandshakeOptions {
   max?: string | undefined;
   broker?: string | undefined;
   yes?: boolean | undefined;
+  payTo?: string | undefined;
   checkOnly?: boolean | undefined;
   confirm: (question: string) => Promise<boolean>;
   fetcher?: typeof fetch | undefined;
@@ -41,6 +42,14 @@ export function explorer(networkId: string, transaction: string): string | undef
   if (networkId === "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" && /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(transaction)) return `https://solscan.io/tx/${transaction}`;
   if (networkId === "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" && /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(transaction)) return `https://solscan.io/tx/${transaction}?cluster=devnet`;
   return undefined;
+}
+
+export function isTransactionFor(networkId: string, transaction: string): boolean {
+  const network = networkOf(networkId);
+  if (!network) return false;
+  return network.family === "evm"
+    ? /^0x[0-9a-fA-F]{64}$/.test(transaction)
+    : /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(transaction);
 }
 
 export function findTransaction(value: unknown): string | undefined {
@@ -120,11 +129,18 @@ export interface BaseReceipt {
   settled: boolean;
   reason?: string;
   payer?: string;
+  payee?: string;
   amount?: string;
+}
+
+export interface SaleTerms {
+  units: bigint;
+  payTo?: string | undefined;
 }
 
 export async function confirmOnBase(
   transaction: string,
+  sale: SaleTerms,
   fetcher: typeof fetch = fetch,
   attempts = 5
 ): Promise<BaseReceipt> {
@@ -147,22 +163,38 @@ export async function confirmOnBase(
     if (receipt.status !== "0x1") return { settled: false, reason: "the transaction reverted on Base" };
 
     const logs = Array.isArray(receipt.logs) ? receipt.logs : [];
-    const transfer = logs.find((log) => {
-      const entry = log as { address?: unknown; topics?: unknown };
+    const transfers = logs.flatMap((log) => {
+      const entry = log as { address?: unknown; topics?: unknown; data?: unknown };
       const topics = Array.isArray(entry.topics) ? entry.topics : [];
-      return typeof entry.address === "string"
-        && entry.address.toLowerCase() === BASE_USDC.toLowerCase()
-        && typeof topics[0] === "string"
-        && topics[0].toLowerCase() === transferTopic
-        && typeof topics[1] === "string";
-    }) as { topics?: string[]; data?: unknown } | undefined;
+      if (typeof entry.address !== "string" || entry.address.toLowerCase() !== BASE_USDC.toLowerCase()) return [];
+      if (typeof topics[0] !== "string" || topics[0].toLowerCase() !== transferTopic) return [];
+      if (typeof topics[1] !== "string" || typeof topics[2] !== "string") return [];
+      if (typeof entry.data !== "string" || !/^0x[0-9a-fA-F]+$/.test(entry.data)) return [];
+      return [{
+        from: `0x${topics[1].slice(-40)}`,
+        to: `0x${topics[2].slice(-40)}`,
+        value: BigInt(entry.data)
+      }];
+    });
 
-    if (!transfer) return { settled: false, reason: "no USDC transfer in that transaction" };
-    const payer = `0x${transfer.topics![1]!.slice(-40)}`;
-    const amount = typeof transfer.data === "string" && /^0x[0-9a-fA-F]+$/.test(transfer.data)
-      ? BigInt(transfer.data).toString()
-      : undefined;
-    return { settled: true, payer, ...(amount !== undefined ? { amount } : {}) };
+    if (transfers.length === 0) return { settled: false, reason: "no USDC transfer in that transaction" };
+    const matched = transfers.find((transfer) =>
+      transfer.value === sale.units
+      && (!sale.payTo || transfer.to.toLowerCase() === sale.payTo.toLowerCase()));
+    if (!matched) {
+      return {
+        settled: false,
+        reason: sale.payTo
+          ? `no USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo} in that transaction`
+          : `no USDC transfer of ${formatUsdc(sale.units.toString())} in that transaction`
+      };
+    }
+    return {
+      settled: true,
+      payer: matched.from,
+      payee: matched.to,
+      amount: matched.value.toString()
+    };
   }
   return { settled: false, reason: `no receipt on Base mainnet for ${transaction}` };
 }
@@ -248,13 +280,20 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
     return false;
   }
   const candidate = settlement?.transaction ?? findTransaction(output);
-  const transaction = candidate && findTransaction(candidate) ? candidate : undefined;
-  const link = transaction
-    ? (settlement?.network ? explorer(settlement.network, transaction) : undefined) ?? options402.map((accept) => explorer(accept.network, transaction)).find(Boolean)
+  const networks402 = settlement?.network ? [settlement.network] : options402.map((accept) => accept.network);
+  const transaction = candidate && networks402.some((id) => isTransactionFor(id, candidate))
+    ? candidate
     : undefined;
+  if (!transaction) {
+    console.log(pc.red("\nThe seller reported a payment without a settlement transaction, so there is nothing to prove it."));
+    console.log(pc.dim("A first sale counts once the payment settles on chain and the receipt names the transaction.\n"));
+    return false;
+  }
+  const link = (settlement?.network ? explorer(settlement.network, transaction) : undefined)
+    ?? options402.map((accept) => explorer(accept.network, transaction)).find(Boolean);
   const done = Number(record?.status);
   console.log(pc.green(`\nFirst sale done${Number.isInteger(done) ? ` · HTTP ${done}` : ""}`));
-  if (transaction) console.log(`${pc.dim("tx")}  ${link ?? transaction}`);
+  console.log(`${pc.dim("tx")}  ${link ?? safe(transaction)}`);
   console.log(`${pc.dim("listing")}  ${await listingStatus(result.url, options.fetcher)}\n`);
   return true;
 }
@@ -292,8 +331,17 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
     if (reason) console.log(pc.dim(`x402-mqtt: ${reason.slice(0, 300)}`));
     return false;
   }
+  const reported = output.match(/paid \$([0-9]+(?:\.[0-9]{1,6})?)/)?.[1];
+  if (!reported) {
+    console.log(pc.red("\nx402-mqtt did not report what it paid, so the receipt cannot be matched to the sale.\n"));
+    return false;
+  }
   console.log(pc.dim("Confirming the receipt on Base…"));
-  const receipt = await confirmOnBase(transaction, options.fetcher);
+  const receipt = await confirmOnBase(
+    transaction,
+    { units: capUnits(reported), ...(options.payTo ? { payTo: options.payTo } : {}) },
+    options.fetcher
+  );
   if (!receipt.settled) {
     console.log(pc.red(`\nx402-mqtt reported a payment that Base does not confirm: ${safe(receipt.reason ?? "unknown")}.`));
     console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction) ?? safe(transaction)}\n`);
@@ -302,7 +350,12 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   const paid = output.match(/paid \$[0-9.]+ · [^\n]*/)?.[0];
   console.log(pc.green("\nFirst sale done on Base"));
   if (paid) console.log(pc.dim(safe(paid).replace(/ · tx .*/, "")));
-  if (receipt.amount) console.log(`${pc.dim("settled")}  ${formatUsdc(receipt.amount)} USDC from ${safe(receipt.payer ?? "")}`);
+  if (receipt.amount) {
+    console.log(`${pc.dim("settled")}  ${formatUsdc(receipt.amount)} USDC from ${safe(receipt.payer ?? "")} to ${safe(receipt.payee ?? "")}`);
+  }
+  if (!options.payTo) {
+    console.log(pc.dim("Pass --pay-to <address> to also require the payout address to match."));
+  }
   console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction)}\n`);
   return true;
 }

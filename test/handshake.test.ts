@@ -113,6 +113,19 @@ describe("cult handshake", () => {
     expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quote })).toBe(false);
   });
 
+  it("never counts a claimed success with no transaction as the first sale", async () => {
+    for (const body of [
+      { success: true, network: "eip155:8453" },
+      { success: true, transaction: "", network: "eip155:8453" },
+      { success: true, transaction: "not-a-hash", network: "eip155:8453" },
+      { success: true, transaction: "0xabc", network: "eip155:8453" }
+    ]) {
+      const receipt = Buffer.from(JSON.stringify(body)).toString("base64");
+      fakeAwal(JSON.stringify({ status: 200, headers: { "PAYMENT-RESPONSE": receipt } }));
+      expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quote })).toBe(false);
+    }
+  });
+
   it("never counts a settlement on another network as the first sale", async () => {
     const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:84532" })).toString("base64");
     fakeAwal(JSON.stringify({ status: 200, headers: { "PAYMENT-RESPONSE": receipt } }));
@@ -180,6 +193,38 @@ describe("cult handshake", () => {
     }
   });
 
+  it("matches the receipt to the sale, not just to any USDC transfer", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    process.env.X402_MQTT_BUYER_KEY = "0x" + "1".repeat(64);
+    process.env.PATH = `${directory}:${previousPath}`;
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho 'paid $0.001 · 1.9 load · tx ${tx}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    const otherPayee = `0x${"0".repeat(24)}${"ef".repeat(20)}`;
+    try {
+      const wrongAmount = {
+        status: "0x1",
+        logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, buyerTopic], data: "0x1" }]
+      };
+      expect(await runHandshake("mac/cpu/load", {
+        confirm: async () => true, yes: true, fetcher: receiptFetcher(wrongAmount)
+      })).toBe(false);
+
+      const wrongPayee = {
+        status: "0x1",
+        logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, otherPayee], data: "0x3e8" }]
+      };
+      expect(await runHandshake("mac/cpu/load", {
+        confirm: async () => true, yes: true, payTo: `0x${"cd".repeat(20)}`, fetcher: receiptFetcher(wrongPayee)
+      })).toBe(false);
+
+      expect(await runHandshake("mac/cpu/load", {
+        confirm: async () => true, yes: true, payTo: `0x${"cd".repeat(20)}`, fetcher: receiptFetcher(settledReceipt)
+      })).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
   it("refuses a machine sale that Base does not confirm", async () => {
     const previous = process.env.X402_MQTT_BUYER_KEY;
     process.env.X402_MQTT_BUYER_KEY = "0x" + "1".repeat(64);
@@ -205,7 +250,7 @@ describe("cult handshake", () => {
   });
 
   it("reads the payer and amount out of the USDC transfer log", async () => {
-    const confirmed = await confirmOnBase(tx, receiptFetcher(settledReceipt));
+    const confirmed = await confirmOnBase(tx, { units: 1000n }, receiptFetcher(settledReceipt));
 
     expect(confirmed.settled).toBe(true);
     expect(confirmed.amount).toBe("1000");

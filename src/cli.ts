@@ -265,10 +265,11 @@ program
   .option("-d, --data <json>", "JSON request body")
   .option("--max <usd>", "spending cap in USD", "0.01")
   .option("--broker <url>", "MQTT broker for a machine topic")
+  .option("--pay-to <address>", "require the machine payout address to match the receipt")
   .option("--check", "only show whether it is listed")
   .option("-y, --yes", "pay without asking")
   .description("Prove a seller with one real, capped first sale")
-  .action(async (target: string, options: { method?: string; data?: string; max?: string; broker?: string; check?: boolean; yes?: boolean }) => {
+  .action(async (target: string, options: { method?: string; data?: string; max?: string; broker?: string; payTo?: string; check?: boolean; yes?: boolean }) => {
     const ok = await runHandshake(target, {
       ...options,
       checkOnly: options.check,
