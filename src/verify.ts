@@ -140,24 +140,24 @@ export function evaluateReviewDelivery(
   };
 }
 
-export function verifyJob(
+export async function verifyJob(
   job: CultJob,
   requiredState: "OPEN" | "MERGED" = "OPEN"
-): VerificationResult {
+): Promise<VerificationResult> {
   if (!job.delivery) {
     throw new Error("The provider has not submitted a pull-request delivery");
   }
   if (job.contract.kind === "cultos.github.review.v1" || isAeonReviewDelivery(job.delivery)) {
     throw new Error("Expected a pull-request delivery");
   }
-  const pullRequest = getRepositoryPullRequest(job.delivery.url);
-  const checks = getRepositoryChecks(pullRequest);
+  const pullRequest = await getRepositoryPullRequest(job.delivery.url);
+  const checks = await getRepositoryChecks(pullRequest);
   return evaluateDelivery(job, pullRequest, checks, requiredState);
 }
 
-export function verifyReviewJob(job: CultJob): ReviewVerificationResult {
+export async function verifyReviewJob(job: CultJob): Promise<ReviewVerificationResult> {
   if (job.contract.kind !== "cultos.github.review.v1") {
     throw new Error("Expected an Aeon review contract");
   }
-  return evaluateReviewDelivery(job, getRepositoryPullRequest(job.contract.pullRequest));
+  return evaluateReviewDelivery(job, await getRepositoryPullRequest(job.contract.pullRequest));
 }

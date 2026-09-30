@@ -277,7 +277,7 @@ program
   .option("--chain <id>", "ACP chain ID", "8453")
   .option("--expiry <seconds>", "Custom job expiry", "86400")
   .description("Create an ACP job from an issue")
-  .action((value: string, options: Record<string, string | undefined>) => {
+  .action(async (value: string, options: Record<string, string | undefined>) => {
     const repositoryPlatform = platform(options.platform);
     const number = issueReference(value, repositoryPlatform);
     assertStorableJobReference(number);
@@ -290,7 +290,7 @@ program
     const repository = getRepositoryInfo(options.repo, repositoryPlatform);
     const issue = getRepositoryIssue(value, options.repo, repositoryPlatform);
     requireSameRepository(repository, issue);
-    const pullRequest = options.pr ? getRepositoryPullRequest(options.pr) : undefined;
+    const pullRequest = options.pr ? await getRepositoryPullRequest(options.pr) : undefined;
     if (pullRequest && repositoryPlatform !== "github") {
       throw new Error("Aeon reviews currently require GitHub");
     }
@@ -445,11 +445,11 @@ program
   .requiredOption("--pr <url>", "Delivered pull request")
   .option("--chain <id>", "ACP chain ID")
   .description("Submit a pull request as an ACP provider")
-  .action((issue: string | undefined, options: { job?: string; pr: string; chain?: string }) => {
+  .action(async (issue: string | undefined, options: { job?: string; pr: string; chain?: string }) => {
     const { jobId, network } = providerAction(issue, options);
     const identity = providerIdentity(jobId, network);
     console.log(pc.dim(`Provider identity: ${safe(identity.name)} · ${identity.walletAddress}`));
-    const pullRequest = getRepositoryPullRequest(options.pr);
+    const pullRequest = await getRepositoryPullRequest(options.pr);
     const delivery = createPullRequestDelivery(
       pullRequest.url,
       pullRequest.headSha,
@@ -463,11 +463,11 @@ program
   .command("verify")
   .argument("<issue>", "Issue ID")
   .description("Verify the delivered work")
-  .action((value: string) => {
+  .action(async (value: string) => {
     const number = value;
     const job = getJob(number);
     if (job.contract.kind === "cultos.github.review.v1") {
-      const review = verifyReviewJob(job);
+      const review = await verifyReviewJob(job);
       console.log(pc.bold(`\nCULT OS // VERIFY REVIEW #${review.pullRequest}\n`));
       const clean = verdictIsClean(review.verdict);
       const verdictColour = clean ? pc.green : pc.yellow;
@@ -496,7 +496,7 @@ program
       }
       return;
     }
-    const result = verifyJob(job);
+    const result = await verifyJob(job);
 
     console.log(pc.bold(`\nCULT OS // VERIFY PR #${result.pullRequest}\n`));
     for (const check of result.checks) {
@@ -532,7 +532,7 @@ program
   .option("--reject", "Reject the delivery")
   .option("--reason <text>", "Settlement reason", "Work reviewed through CultOS")
   .description("Complete or reject an ACP job and publish its receipt")
-  .action((value: string, options: { approve?: boolean; reject?: boolean; reason: string }) => {
+  .action(async (value: string, options: { approve?: boolean; reject?: boolean; reason: string }) => {
     const number = value;
     const job = getJob(number);
     if (options.approve === options.reject) {
@@ -551,8 +551,8 @@ program
     if (!retryingReceipt) {
       if (options.approve) {
         const verification = job.contract.kind === "cultos.github.review.v1"
-          ? verifyReviewJob(job)
-          : verifyJob(job, "MERGED");
+          ? await verifyReviewJob(job)
+          : await verifyJob(job, "MERGED");
         if (!verification.passed) {
           throw new Error(`Settlement verification failed:\n- ${verification.failures.join("\n- ")}`);
         }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { width as displayWidth } from "../src/display.js";
 import {
   createOutputBuffer,
   parseCommandLine,
@@ -179,5 +180,43 @@ describe("createOutputBuffer", () => {
     const value = output.read();
     expect(value).toHaveLength(1024);
     expect(value.endsWith("019999")).toBe(true);
+  });
+});
+
+describe("frame alignment in terminal columns", () => {
+  // The frame is drawn by padding each row to a fixed width. Measuring that
+  // width with String.length counts UTF-16 code units, which is not what the
+  // terminal draws: a CJK character occupies two columns, and an emoji cluster
+  // can be four code units wide but still two columns. Either way the right
+  // border drifts away from the rows above it.
+  const everyRowSameWidth = (screen: string): number[] =>
+    [...new Set(stripAnsi(screen).split("\n").map((line) => displayWidth(line)))];
+
+  test("ascii output keeps a straight border", () => {
+    expect(everyRowSameWidth(renderResult("plain output", 0, 80, 20))).toHaveLength(1);
+  });
+
+  test("CJK output keeps a straight border", () => {
+    const screen = renderResult("残高の解析を修正しました。テストを追加。", 0, 80, 20);
+
+    expect(everyRowSameWidth(screen)).toHaveLength(1);
+  });
+
+  test("emoji output keeps a straight border", () => {
+    const screen = renderResult("done 🎉 shipped 👩‍💻 verified ✅", 0, 80, 20);
+
+    expect(everyRowSameWidth(screen)).toHaveLength(1);
+  });
+
+  test("a long CJK line wraps without overflowing the frame", () => {
+    const screen = renderResult("語".repeat(200), 0, 80, 20);
+
+    expect(everyRowSameWidth(screen)).toHaveLength(1);
+  });
+
+  test("the running screen stays aligned too", () => {
+    const screen = renderRunning("watch 42", "処理中です…", 3, 80, 20);
+
+    expect(everyRowSameWidth(screen)).toHaveLength(1);
   });
 });

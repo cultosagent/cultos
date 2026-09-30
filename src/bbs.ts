@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { plain } from "./display.js";
+import { chunk, plain, truncate, width as displayWidth } from "./display.js";
 
 const ESC = "\u001b[";
 
@@ -50,10 +50,11 @@ function commandAt(index: number): DeckCommand {
 
 function fit(value: string, width: number): string {
   const visible = plain(value);
-  if (visible.length > width) {
-    return visible.slice(0, width);
+  const occupied = displayWidth(visible);
+  if (occupied > width) {
+    return truncate(visible, width);
   }
-  return value + " ".repeat(width - visible.length);
+  return value + " ".repeat(width - occupied);
 }
 
 function row(value: string, width: number): string {
@@ -98,12 +99,7 @@ function wrap(value: string, width: number): string[] {
       lines.push("");
       continue;
     }
-    let remaining = sourceLine;
-    while (remaining.length > width) {
-      lines.push(remaining.slice(0, width));
-      remaining = remaining.slice(width);
-    }
-    lines.push(remaining);
+    lines.push(...chunk(sourceLine, width));
   }
   return lines;
 }

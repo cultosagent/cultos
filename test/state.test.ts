@@ -1,7 +1,15 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   assertStorableJobReference,
   jobReference,
@@ -121,5 +129,74 @@ describe("state reads within one command", () => {
 
     vi.doUnmock("node:fs");
     vi.resetModules();
+  });
+});
+
+describe("the state write lock", () => {
+  const job = {
+    issueNumber: 42,
+    repository: "thecultos/example",
+    contract: {
+      kind: "cultos.github.issue.v1" as const,
+      repository: "https://github.com/thecultos/example",
+      issue: "https://github.com/thecultos/example/issues/42",
+      baseRef: "main",
+      title: "Fix balance parsing",
+      acceptanceCriteria: [],
+      delivery: { type: "github.pull_request" as const }
+    },
+    provider: "0xabc",
+    jobId: "813",
+    chainId: 8453,
+    status: "open",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:00.000Z"
+  };
+
+  // state.ts resolves its path from `git rev-parse` once, so the repository
+  // root is stubbed to a temporary directory and the module re-imported.
+  async function stateIn(root: string) {
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({ execFileSync: () => `${root}\n` }));
+    return import("../src/state.js");
+  }
+
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  });
+
+  test("removes the lock after a successful write", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cultos-lock-"));
+    const state = await stateIn(root);
+
+    state.saveJob(job as Parameters<typeof state.saveJob>[0]);
+
+    expect(existsSync(join(root, ".cultos", "jobs.json"))).toBe(true);
+    expect(existsSync(join(root, ".cultos", "jobs.json.lock"))).toBe(false);
+  });
+
+  test("reclaims a lock left behind by a killed process", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cultos-lock-"));
+    const lock = join(root, ".cultos", "jobs.json.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, "99999\n");
+    // Older than the staleness window, as if the owner died.
+    const longAgo = new Date(Date.now() - 120_000);
+    utimesSync(lock, longAgo, longAgo);
+
+    const state = await stateIn(root);
+    state.saveJob(job as Parameters<typeof state.saveJob>[0]);
+
+    expect(existsSync(lock)).toBe(false);
+    expect(Object.keys(state.listJobs())).toHaveLength(1);
+  });
+
+  test("releases the lock when the write fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cultos-lock-"));
+    const state = await stateIn(root);
+
+    expect(() => state.updateJob(404, { status: "funded" })).toThrow();
+    expect(existsSync(join(root, ".cultos", "jobs.json.lock"))).toBe(false);
   });
 });
