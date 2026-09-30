@@ -12,6 +12,14 @@ export interface VerificationResult {
   url: string;
   headSha: string;
   checks: RepositoryCheck[];
+  /**
+   * What the provider agreed to, carried through from the contract.
+   *
+   * Free text from the issue, so nothing here can be decided automatically.
+   * It is reported so the maintainer reads it at the moment they approve,
+   * rather than it existing only in the contract nobody opens again.
+   */
+  acceptanceCriteria: string[];
   passed: boolean;
   failures: string[];
 }
@@ -26,6 +34,18 @@ export interface ReviewVerificationResult {
   runUrl: string;
   passed: boolean;
   failures: string[];
+}
+
+/**
+ * Whether a verdict reports a clean review.
+ *
+ * A review that concludes "blocked" is a review that did its job, so the
+ * verdict is not a verification failure and does not gate settlement -- the
+ * maintainer is buying the review, not its conclusion. It is reported
+ * separately so the CLI can say so out loud instead of leaving it implicit.
+ */
+export function verdictIsClean(verdict: ReviewVerificationResult["verdict"]): boolean {
+  return verdict === "approve-ready";
 }
 
 function isPullRequestUrl(repository: string, pullRequest: string): boolean {
@@ -74,6 +94,7 @@ export function evaluateDelivery(
     url: pullRequest.url,
     headSha: pullRequest.headSha,
     checks,
+    acceptanceCriteria: job.contract.acceptanceCriteria,
     passed: failures.length === 0,
     failures
   };

@@ -88,3 +88,13 @@ CultOS requires:
 - Merged pull request during approved settlement
 - At least one CI check
 - Passing or skipped CI checks
+
+CultOS does not check `acceptanceCriteria`. They are free text from the issue, so
+no deterministic check can decide them, and the provider is told to treat them as
+the job specification. `cult verify` and an approved `cult settle` print them so a
+maintainer reads what was agreed before releasing payment, but judging them stays
+a human step.
+
+A review verdict is likewise reported, not enforced. `blocked` is the reviewer's
+conclusion about the pull request, not a fault in the review, so it passes
+verification and can be settled. See [Aeon reviews](aeon-review.md).

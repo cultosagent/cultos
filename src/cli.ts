@@ -47,7 +47,7 @@ import {
   saveJob,
   updateJob
 } from "./state.js";
-import { verifyJob, verifyReviewJob } from "./verify.js";
+import { verdictIsClean, verifyJob, verifyReviewJob } from "./verify.js";
 
 const program = new Command();
 const packageVersion = (JSON.parse(
@@ -469,7 +469,9 @@ program
     if (job.contract.kind === "cultos.github.review.v1") {
       const review = await verifyReviewJob(job);
       console.log(pc.bold(`\nCULT OS // VERIFY REVIEW #${review.pullRequest}\n`));
-      console.log(`${pc.dim("VERDICT")}     ${review.verdict.toUpperCase()}`);
+      const clean = verdictIsClean(review.verdict);
+      const verdictColour = clean ? pc.green : pc.yellow;
+      console.log(`${pc.dim("VERDICT")}     ${verdictColour(review.verdict.toUpperCase())}`);
       console.log(`${pc.dim("SUMMARY")}     ${safe(review.summary)}`);
       for (const finding of review.findings) {
         const marker = finding.severity === "medium" ? pc.yellow("●") : pc.red("●");
@@ -477,7 +479,14 @@ program
         console.log(`${marker} ${safe(finding.path)}${line} ${safe(finding.title)}`);
       }
       if (review.passed) {
-        console.log(pc.green(`\nReview verified at ${safe(review.headSha).slice(0, 12)}.\n`));
+        console.log(pc.green(`\nReview verified at ${safe(review.headSha).slice(0, 12)}.`));
+        console.log(pc.dim(
+          clean
+            ? "The verdict is the reviewer's conclusion, not a verification result.\n"
+            : "The verdict is the reviewer's conclusion about the pull request, not a\n"
+              + "verification failure. The review itself is valid and settling will pay for\n"
+              + "it. Read the findings before merging the pull request.\n"
+        ));
         updateJob(number, { status: "verified" });
       } else {
         console.log(pc.red("\nVerification failed:"));
@@ -493,6 +502,14 @@ program
     for (const check of result.checks) {
       const marker = ["pass", "skipping"].includes(check.bucket) ? pc.green("●") : pc.red("●");
       console.log(`${marker} ${safe(check.name)} ${pc.dim(safe(check.state))}`);
+    }
+
+    if (result.acceptanceCriteria.length > 0) {
+      console.log(pc.bold("\nAgreed in the contract"));
+      for (const criterion of result.acceptanceCriteria) {
+        console.log(`${pc.dim("○")} ${safe(criterion)}`);
+      }
+      console.log(pc.dim("CultOS cannot decide these. Check them before you settle."));
     }
 
     if (result.passed) {
@@ -538,6 +555,24 @@ program
           : await verifyJob(job, "MERGED");
         if (!verification.passed) {
           throw new Error(`Settlement verification failed:\n- ${verification.failures.join("\n- ")}`);
+        }
+        // Neither of these can be decided by CultOS, and both are about to be
+        // paid for. Say so at the moment the money moves rather than leaving
+        // the maintainer to remember what the contract said.
+        if ("verdict" in verification && !verdictIsClean(verification.verdict)) {
+          console.log(pc.yellow(
+            `\nThis review concluded ${verification.verdict.toUpperCase()}.`
+          ));
+          console.log(pc.dim(
+            "Settling pays for the review, which is valid. It does not endorse the\n"
+            + "pull request the review examined."
+          ));
+        }
+        if ("acceptanceCriteria" in verification && verification.acceptanceCriteria.length > 0) {
+          console.log(pc.bold("\nPaying for work agreed as:"));
+          for (const criterion of verification.acceptanceCriteria) {
+            console.log(`${pc.dim("○")} ${safe(criterion)}`);
+          }
         }
         completeJob(job.jobId, job.chainId, options.reason);
       } else {
