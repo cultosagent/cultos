@@ -103,9 +103,13 @@ function describe(accept: Accept): string {
   return `${formatUsdc(accept.amount)} USDC on ${networkOf(accept.network)?.name ?? accept.network} to ${accept.payTo}`;
 }
 
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function payCommand(url: string, method: string, data: string | undefined, cap: bigint): string {
-  const body = data ? ` -d '${data.replace(/'/g, "'\\''")}'` : "";
-  return `npx awal@${AWAL_VERSION} x402 pay ${url} -X ${method}${body} --max-amount ${cap} --scheme exact`;
+  const body = data ? ` -d ${quote(data)}` : "";
+  return `npx awal@${AWAL_VERSION} x402 pay ${quote(url)} -X ${quote(method)}${body} --max-amount ${cap} --scheme exact`;
 }
 
 export async function ensureAwal(confirm: HandshakeOptions["confirm"]): Promise<boolean> {
@@ -158,7 +162,7 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
 
   if (!await ensureAwal(options.confirm)) {
     console.log(`Pay from any x402 wallet with these terms, or run:\n  ${safe(payCommand(result.url, method, options.data, cap))}`);
-    console.log(pc.dim(`Then check the listing with: cult handshake ${safe(result.url)} --check\n`));
+    console.log(pc.dim(`Then check the listing with: cult handshake ${safe(quote(result.url))} --check\n`));
     return false;
   }
   if (!options.yes && !await options.confirm("Make this real payment now?")) {

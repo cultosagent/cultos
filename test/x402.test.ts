@@ -74,6 +74,13 @@ describe("cult check", () => {
     expect(passed(result)).toBe(false);
   });
 
+  it("fails an empty or null Bazaar field", async () => {
+    for (const bazaar of [null, {}, "yes", { info: null }]) {
+      const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header({ ...good, extensions: { bazaar } }) } })) as typeof fetch;
+      expect(passed(await checkEndpoint("https://api.example.com/data", { fetcher }))).toBe(false);
+    }
+  });
+
   it("fails without Bazaar metadata", async () => {
     const result = await checkEndpoint(`${origin}/no-bazaar`);
     expect(passed(result)).toBe(false);

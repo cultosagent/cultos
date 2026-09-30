@@ -11,7 +11,7 @@ const tx = `0x${"ab".repeat(32)}`;
 const header = Buffer.from(JSON.stringify({
   x402Version: 2,
   accepts: [{ scheme: "exact", network: "eip155:8453", amount: "1000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo, maxTimeoutSeconds: 60 }],
-  extensions: { bazaar: {} }
+  extensions: { bazaar: { info: {} } }
 })).toString("base64");
 
 const endpoint = "https://api.example.com/data";
@@ -108,11 +108,20 @@ describe("cult handshake", () => {
     const testnet = Buffer.from(JSON.stringify({
       x402Version: 2,
       accepts: [{ scheme: "exact", network: "eip155:84532", amount: "1000", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo, maxTimeoutSeconds: 60 }],
-      extensions: { bazaar: {} }
+      extensions: { bazaar: { info: {} } }
     })).toString("base64");
     const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": testnet } })) as typeof fetch;
     expect(await runHandshake(endpoint, { confirm: async () => true, fetcher })).toBe(false);
     expect(existsSync(log)).toBe(false);
+  });
+
+  it("quotes the fallback payment command so a hostile URL cannot run in the shell", async () => {
+    process.env.PATH = directory;
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
+    await runHandshake("https://api.example.com/data?x=$(id)", { confirm: async () => false, fetcher: quote });
+    const command = lines.find((line) => line.includes("x402 pay"));
+    expect(command).toContain("'https://api.example.com/data?x=$(id)'");
   });
 
   it("never sends a first sale over plain http", async () => {

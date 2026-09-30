@@ -230,7 +230,8 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
           : { level: "fail", label: network.name, detail: "could not reach Solana to confirm the payout has a USDC account: run it again" });
     }
   }
-  findings.push(parsed.extensions && "bazaar" in parsed.extensions
+  const bazaar = parsed.extensions?.bazaar as { info?: unknown } | null | undefined;
+  findings.push(bazaar && typeof bazaar === "object" && bazaar.info && typeof bazaar.info === "object"
     ? { level: "pass", label: "Bazaar", detail: "discovery metadata present" }
     : { level: "fail", label: "Bazaar", detail: "no discovery metadata, so marketplaces cannot list it: add a bazaar extension (cult build x402 includes one)" });
   return { url: url.href, status: 402, paymentRequired: parsed, findings };
