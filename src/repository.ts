@@ -77,7 +77,7 @@ export function getRepositoryIssue(
   return { id: issue.number, title: issue.title, body: issue.body, url: issue.url };
 }
 
-export function getRepositoryPullRequest(reference: string): RepositoryPullRequest {
+export async function getRepositoryPullRequest(reference: string): Promise<RepositoryPullRequest> {
   if (reference.startsWith("gitlawb://") || reference.includes("gitlawb.com/")) {
     return getGitLawbPullRequest(reference);
   }
@@ -85,7 +85,9 @@ export function getRepositoryPullRequest(reference: string): RepositoryPullReque
   return { platform: "github", headRef: "", ...pullRequest };
 }
 
-export function getRepositoryChecks(pullRequest: RepositoryPullRequest): RepositoryCheck[] {
+export async function getRepositoryChecks(
+  pullRequest: RepositoryPullRequest
+): Promise<RepositoryCheck[]> {
   return pullRequest.platform === "gitlawb"
     ? getGitLawbVerificationChecks(pullRequest)
     : getPullRequestChecks(pullRequest.url);

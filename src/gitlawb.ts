@@ -72,8 +72,7 @@ function apiNode(): string {
   } catch {
     throw new Error(`GITLAWB_NODE is not a valid URL: ${configured}`);
   }
-  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
+    if (!isSecureNode(parsed)) {
     throw new Error(
       `GITLAWB_NODE must use https (got ${parsed.protocol}//). `
       + "Verification results from a plaintext node cannot be trusted."
@@ -82,34 +81,61 @@ function apiNode(): string {
   return configured;
 }
 
-function api(path: string): unknown {
-  const result = spawnSync("curl", [
-    "--fail",
-    "--silent",
-    "--show-error",
-    "--proto",
-    "=https,http",
-    "--proto-redir",
-    "=https",
-    "--max-redirs",
-    "3",
-    "--max-time",
-    String(apiTimeoutSeconds),
-    "--",
-    `${apiNode()}${path}`
-  ], {
-    encoding: "utf8",
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: (apiTimeoutSeconds + 5) * 1000
+function isSecureNode(url: URL): boolean {
+  if (url.protocol === "https:") return true;
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  return url.protocol === "http:" && loopback;
+}
+
+const maxRedirects = 3;
+
+/**
+ * Follow redirects without letting one downgrade the connection.
+ *
+ * Mirrors what the previous `curl` invocation enforced with `--proto-redir
+ * =https --max-redirs 3`: a redirect is followed, but only to somewhere that
+ * would have been an acceptable node in the first place.
+ */
+async function request(url: string, redirectsLeft = maxRedirects): Promise<Response> {
+  const response = await fetch(url, {
+    redirect: "manual",
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(apiTimeoutSeconds * 1000)
   });
-  if (result.error && "code" in result.error && result.error.code === "ENOENT") {
-    throw new Error("curl is required to reach the GitLawb node but is not installed");
+
+  if (response.status < 300 || response.status >= 400) return response;
+
+  const location = response.headers.get("location");
+  if (!location) throw new Error("GitLawb node sent a redirect with no location");
+  if (redirectsLeft === 0) throw new Error("GitLawb node redirected too many times");
+
+  const target = new URL(location, url);
+  if (!isSecureNode(target)) {
+    throw new Error(`GitLawb node redirected to ${target.protocol}//, which is not secure`);
   }
-  if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || "GitLawb API request failed");
-  }
+  return request(target.toString(), redirectsLeft - 1);
+}
+
+async function api(path: string): Promise<unknown> {
+  let response: Response;
   try {
-    return JSON.parse(result.stdout);
+    response = await request(`${apiNode()}${path}`);
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error(`GitLawb node did not respond within ${apiTimeoutSeconds} seconds`);
+    }
+    if (error instanceof Error && error.message.startsWith("GitLawb")) throw error;
+    throw new Error(
+      `GitLawb API request failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(`GitLawb API request failed with status ${response.status}`);
+  }
+
+  try {
+    return await response.json();
   } catch {
     throw new Error("GitLawb API returned an unreadable response");
   }
@@ -212,10 +238,10 @@ function remoteHeadSha(repository: GitLawbReference, branch: string): string {
   return sha;
 }
 
-export function getGitLawbPullRequest(reference: string): RepositoryPullRequest {
+export async function getGitLawbPullRequest(reference: string): Promise<RepositoryPullRequest> {
   const parsed = parsePullRequestReference(reference);
   const owner = ownerKey(parsed.owner);
-  const pullRequest = pullRequestSchema.parse(api(
+  const pullRequest = pullRequestSchema.parse(await api(
     `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(parsed.repository)}/pulls/${parsed.number}`
   ));
   const headRef = pullRequest.source_branch;
@@ -230,13 +256,15 @@ export function getGitLawbPullRequest(reference: string): RepositoryPullRequest 
   };
 }
 
-export function getGitLawbVerificationChecks(pullRequest: RepositoryPullRequest): RepositoryCheck[] {
+export async function getGitLawbVerificationChecks(
+  pullRequest: RepositoryPullRequest
+): Promise<RepositoryCheck[]> {
   const parsed = parsePullRequestReference(pullRequest.url);
   if (!pullRequest.headRef) {
     return [{ name: "Signed push certificate", state: "missing branch", bucket: "fail" }];
   }
   const owner = ownerKey(parsed.owner);
-  const certificates = certificateListSchema.parse(api(
+  const certificates = certificateListSchema.parse(await api(
     `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(parsed.repository)}/certs`
   )).certificates;
   const certificate = certificates.find((item) =>
