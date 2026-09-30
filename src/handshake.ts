@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import pc from "picocolors";
+import { safe } from "./display.js";
 import { commandExists } from "./github.js";
 import { X402_MQTT_VERSION } from "./build.js";
 import { checkEndpoint, formatUsdc, isLocal, networkOf, passed, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
@@ -28,8 +29,9 @@ export function capUnits(max: string): bigint {
 export function printFindings(result: CheckResult): void {
   const marker = (finding: Finding) => finding.level === "pass" ? pc.green("●") : finding.level === "warn" ? pc.yellow("○") : pc.red("✕");
   for (const finding of result.findings) {
-    const detail = finding.level === "fail" ? pc.red(finding.detail) : finding.level === "warn" ? pc.yellow(finding.detail) : pc.dim(finding.detail);
-    console.log(`${marker(finding)} ${finding.label.padEnd(14)} ${detail}`);
+    const text = safe(finding.detail);
+    const detail = finding.level === "fail" ? pc.red(text) : finding.level === "warn" ? pc.yellow(text) : pc.dim(text);
+    console.log(`${marker(finding)} ${safe(finding.label).padEnd(14)} ${detail}`);
   }
 }
 
@@ -147,12 +149,12 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
     return false;
   }
   console.log(`\n${pc.bold("Pays one of")}`);
-  for (const accept of options402) console.log(`  ${describe(accept)}`);
+  for (const accept of options402) console.log(`  ${safe(describe(accept))}`);
   console.log(pc.dim(`  capped at ${formatUsdc(cap.toString())} USDC\n`));
 
   if (!await ensureAwal(options.confirm)) {
-    console.log(`Pay from any x402 wallet with these terms, or run:\n  ${payCommand(result.url, method, options.data, cap)}`);
-    console.log(pc.dim(`Then check the listing with: cult handshake ${result.url} --check\n`));
+    console.log(`Pay from any x402 wallet with these terms, or run:\n  ${safe(payCommand(result.url, method, options.data, cap))}`);
+    console.log(pc.dim(`Then check the listing with: cult handshake ${safe(result.url)} --check\n`));
     return false;
   }
   if (!options.yes && !await options.confirm("Make this real payment now?")) {
@@ -172,16 +174,19 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
   const record = output as { status?: number; paymentMade?: boolean; headers?: Record<string, string>; error?: { message?: string } } | undefined;
   const settlement = settlementOf(record?.headers);
   if (paid.status !== 0 || !(record?.paymentMade === true || settlement?.success === true)) {
-    console.log(pc.red(`\nNo payment went through${record?.status ? ` (HTTP ${record.status})` : ""}.`));
-    if (record?.error?.message) console.log(pc.dim(`awal: ${record.error.message.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")}`));
+    const status = Number(record?.status);
+    console.log(pc.red(`\nNo payment went through${Number.isInteger(status) ? ` (HTTP ${status})` : ""}.`));
+    if (typeof record?.error?.message === "string") console.log(pc.dim(`awal: ${safe(record.error.message).slice(0, 300)}`));
     console.log(pc.dim("If awal is not signed in, run: awal auth login you@example.com\n"));
     return false;
   }
-  const transaction = settlement?.transaction ?? findTransaction(output);
+  const candidate = settlement?.transaction ?? findTransaction(output);
+  const transaction = candidate && findTransaction(candidate) ? candidate : undefined;
   const link = transaction
     ? (settlement?.network ? explorer(settlement.network, transaction) : undefined) ?? options402.map((accept) => explorer(accept.network, transaction)).find(Boolean)
     : undefined;
-  console.log(pc.green(`\nFirst sale done · HTTP ${record?.status ?? "?"}`));
+  const done = Number(record?.status);
+  console.log(pc.green(`\nFirst sale done${Number.isInteger(done) ? ` · HTTP ${done}` : ""}`));
   if (transaction) console.log(`${pc.dim("tx")}  ${link ?? transaction}`);
   console.log(`${pc.dim("listing")}  ${await listingStatus(result.url, options.fetcher)}\n`);
   return true;

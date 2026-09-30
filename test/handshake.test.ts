@@ -113,6 +113,22 @@ describe("cult handshake", () => {
     }
   });
 
+  it("never prints terminal control sequences from a hostile payment header", async () => {
+    const hostile = Buffer.from(JSON.stringify({
+      x402Version: 2,
+      accepts: [
+        { scheme: "exact\u001b]52;c;cHduZWQ=\u0007", network: "eip155:8453\u001b[2J", amount: "1000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\u001b[31m", payTo: "\u001b[1A\u001b[2Kpaid", maxTimeoutSeconds: 60 },
+        { scheme: "exact", network: "solana:\u001b[2Jfake", amount: "1000", asset: "x", payTo: "y" }
+      ]
+    })).toString("base64");
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
+    const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": hostile } })) as typeof fetch;
+    await runHandshake("https://api.example.com/data", { confirm: async () => false, fetcher });
+    const printed = lines.join("\n").replace(/\u001b\[[0-9;]*m/g, "");
+    expect(printed).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+  });
+
   it("reads the Agentic Market listing", async () => {
     const listed = async () => new Response(JSON.stringify({ endpoints: [{ url: "https://api.example.com/data" }] }), { status: 200 });
     expect(await listingStatus("https://api.example.com/data", listed as typeof fetch)).toBe("listed on Agentic Market");
