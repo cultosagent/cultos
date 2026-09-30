@@ -74,10 +74,10 @@ describe("cult check", () => {
     expect(passed(result)).toBe(false);
   });
 
-  it("warns, not fails, without Bazaar metadata", async () => {
+  it("fails without Bazaar metadata", async () => {
     const result = await checkEndpoint(`${origin}/no-bazaar`);
-    expect(passed(result)).toBe(true);
-    expect(result.findings.find((finding) => finding.label === "Bazaar")?.level).toBe("warn");
+    expect(passed(result)).toBe(false);
+    expect(result.findings.find((finding) => finding.label === "Bazaar")?.level).toBe("fail");
   });
 
   it("fails an unreadable payment header", async () => {

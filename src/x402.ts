@@ -228,7 +228,7 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
   }
   findings.push(parsed.extensions && "bazaar" in parsed.extensions
     ? { level: "pass", label: "Bazaar", detail: "discovery metadata present" }
-    : { level: "warn", label: "Bazaar", detail: "no discovery metadata: marketplaces may not list it" });
+    : { level: "fail", label: "Bazaar", detail: "no discovery metadata, so marketplaces cannot list it: add a bazaar extension (cult build x402 includes one)" });
   return { url: url.href, status: 402, paymentRequired: parsed, findings };
 }
 
