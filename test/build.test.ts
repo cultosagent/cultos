@@ -45,8 +45,14 @@ describe("cult build x402", () => {
     expect(validSolanaAddress(solana)).toBe(true);
     expect(validSolanaAddress("3au3AcaDpXRJktuu8zWNWEBBufPN6tLSPiVJCsTgXcqn")).toBe(true);
     expect(validSolanaAddress("z".repeat(44))).toBe(false);
-    expect(validSolanaAddress("1".repeat(32))).toBe(true);
+    expect(validSolanaAddress("1".repeat(32))).toBe(false);
     expect(validSolanaAddress("0OIl".repeat(10))).toBe(false);
+  });
+
+  it("rejects payouts nobody controls", () => {
+    expect(() => x402Files({ name: "api", rails: ["base"], price: "0.001", description: "x", payToBase: `0x${"0".repeat(40)}`, mainnet: false })).toThrow("0x address");
+    expect(() => machineFiles({ name: "m", device: "mac", payout: `0x${"0".repeat(40)}`, price: "0.001", mainnet: false })).toThrow("0x address");
+    expect(() => x402Files({ name: "api", rails: ["solana"], price: "0.001", description: "x", payToSolana: "1".repeat(32), mainnet: false })).toThrow("Solana");
   });
 
   it("rejects bad payouts and prices", () => {
