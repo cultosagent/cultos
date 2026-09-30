@@ -97,6 +97,24 @@ describe("cult handshake", () => {
     expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quote })).toBe(false);
   });
 
+  it("never counts a settlement on another network as the first sale", async () => {
+    const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:84532" })).toString("base64");
+    fakeAwal(JSON.stringify({ status: 200, headers: { "PAYMENT-RESPONSE": receipt } }));
+    expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quote })).toBe(false);
+  });
+
+  it("never counts a testnet payment as the first sale", async () => {
+    const log = fakeAwal("{}");
+    const testnet = Buffer.from(JSON.stringify({
+      x402Version: 2,
+      accepts: [{ scheme: "exact", network: "eip155:84532", amount: "1000", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo, maxTimeoutSeconds: 60 }],
+      extensions: { bazaar: {} }
+    })).toString("base64");
+    const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": testnet } })) as typeof fetch;
+    expect(await runHandshake(endpoint, { confirm: async () => true, fetcher })).toBe(false);
+    expect(existsSync(log)).toBe(false);
+  });
+
   it("never sends a first sale over plain http", async () => {
     const log = fakeAwal("{}");
     expect(await runHandshake(`${origin}/data`, { confirm: async () => true })).toBe(false);

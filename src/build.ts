@@ -243,7 +243,7 @@ npm start
 - It runs a built-in broker on \`mqtt://127.0.0.1:1883\` and a sales page on http://127.0.0.1:4020.
 - ${answers.mainnet ? "Mainnet: add CDP_API_KEY_ID and CDP_API_KEY_SECRET to .env (https://portal.cdp.coinbase.com)." : "Testnet with the free x402.org facilitator. For mainnet, set network to eip155:8453 and facilitator to coinbase in x402-mqtt.json, and add the CDP keys to .env."}
 - Sales go to ${answers.payout}. Buyers pay $${answers.price} per reading.
-- First sale: \`X402_MQTT_BUYER_KEY=0x… cult handshake mac/cpu/load --broker mqtt://127.0.0.1:1883\` with a small-balance buyer wallet.
+- First sale, on mainnet, from a small-balance buyer wallet: run \`read -rs X402_MQTT_BUYER_KEY && export X402_MQTT_BUYER_KEY\` so the key stays out of your shell history, then \`cult handshake mac/cpu/load --broker mqtt://127.0.0.1:1883\`.
 `
     };
   }

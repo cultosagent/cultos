@@ -96,7 +96,7 @@ export async function listingStatus(target: string, fetcher: typeof fetch = fetc
 }
 
 function affordable(accepts: Accept[], cap: bigint): Accept[] {
-  return accepts.filter((accept) => accept.scheme === "exact" && networkOf(accept.network) && /^[1-9]\d{0,17}$/.test(accept.amount) && BigInt(accept.amount) <= cap);
+  return accepts.filter((accept) => accept.scheme === "exact" && networkOf(accept.network)?.testnet === false && /^[1-9]\d{0,17}$/.test(accept.amount) && BigInt(accept.amount) <= cap);
 }
 
 function describe(accept: Accept): string {
@@ -144,6 +144,10 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
     return false;
   }
   const options402 = affordable(result.paymentRequired.accepts, cap);
+  if (options402.length === 0 && result.paymentRequired.accepts.some((accept) => networkOf(accept.network)?.testnet)) {
+    console.log(pc.yellow("\nThis endpoint only takes testnet payments. The first sale has to be real: set X402_NETWORK=mainnet and your CDP keys, restart it, and run again.\n"));
+    return false;
+  }
   if (options402.length === 0) {
     console.log(pc.red(`\nEvery option costs more than the ${formatUsdc(cap.toString())} USDC cap. Raise it with --max.\n`));
     return false;
@@ -180,6 +184,10 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
     console.log(pc.dim("If awal is not signed in, run: awal auth login you@example.com\n"));
     return false;
   }
+  if (settlement?.network && !options402.some((accept) => accept.network === settlement.network)) {
+    console.log(pc.red(`\nawal settled on ${safe(settlement.network)}, which is not one of the mainnet options above, so this is not a first sale.\n`));
+    return false;
+  }
   const candidate = settlement?.transaction ?? findTransaction(output);
   const transaction = candidate && findTransaction(candidate) ? candidate : undefined;
   const link = transaction
@@ -199,7 +207,8 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   console.log(pc.bold("\nCULT OS // HANDSHAKE\n"));
   console.log(`${pc.dim("topic")}   ${topic}\n${pc.dim("broker")}  ${broker}\n${pc.dim("cap")}     ${max} USDC\n`);
   if (!process.env.X402_MQTT_BUYER_KEY) {
-    console.log(pc.yellow("Machines are paid with your own small-balance buyer wallet. Set X402_MQTT_BUYER_KEY and run again."));
+    console.log(pc.yellow("Machines are paid with your own small-balance buyer wallet. Load its key without typing it into your shell history, then run again:"));
+    console.log("  read -rs X402_MQTT_BUYER_KEY && export X402_MQTT_BUYER_KEY");
     console.log(pc.dim("cult never stores it; x402-mqtt signs locally and only for USDC on Base.\n"));
     return false;
   }
