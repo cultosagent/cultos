@@ -109,6 +109,17 @@ describe("cult check", () => {
     expect(wrongMint.some((finding) => finding.level === "fail")).toBe(true);
   });
 
+  it("never counts a scheme it does not check toward readiness", async () => {
+    const upto = { ...good, accepts: [{ ...good.accepts[0], scheme: "upto" }] };
+    const onlyUpto = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header(upto) } })) as typeof fetch;
+    expect(passed(await checkEndpoint("https://api.example.com/data", { fetcher: onlyUpto }))).toBe(false);
+    const both = { ...good, accepts: [...good.accepts, { ...good.accepts[0], scheme: "upto", payTo: "not-an-address" }] };
+    const mixed = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header(both) } })) as typeof fetch;
+    const result = await checkEndpoint("https://api.example.com/data", { fetcher: mixed });
+    expect(passed(result)).toBe(true);
+    expect(result.findings.some((finding) => finding.detail.includes("not-an-address"))).toBe(false);
+  });
+
   it("fails a Solana payout that has no USDC account", async () => {
     const solana = { ...good, accepts: [{ scheme: "exact", network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", amount: "1000", asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", payTo: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM" }] };
     const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header(solana) } })) as typeof fetch;

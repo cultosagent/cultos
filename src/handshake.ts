@@ -96,7 +96,7 @@ export async function listingStatus(target: string, fetcher: typeof fetch = fetc
 }
 
 function affordable(accepts: Accept[], cap: bigint): Accept[] {
-  return accepts.filter((accept) => networkOf(accept.network) && BigInt(accept.amount) <= cap);
+  return accepts.filter((accept) => accept.scheme === "exact" && networkOf(accept.network) && /^[1-9]\d{0,17}$/.test(accept.amount) && BigInt(accept.amount) <= cap);
 }
 
 function describe(accept: Accept): string {

@@ -86,7 +86,10 @@ export function inspectAccept(accept: Accept): Finding[] {
   const findings: Finding[] = [];
   const network = networkOf(accept.network);
   const label = network?.name ?? accept.network;
-  if (accept.scheme !== "exact") findings.push({ level: "warn", label, detail: `scheme ${accept.scheme}; only exact is checked` });
+  if (accept.scheme !== "exact") {
+    findings.push({ level: "warn", label, detail: `scheme ${accept.scheme} is not checked and does not count toward readiness` });
+    return findings;
+  }
   if (!network) {
     findings.push({ level: "fail", label, detail: "network is not Base or Solana" });
     return findings;
@@ -207,11 +210,14 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
     ? { level: "pass", label: "x402 v2", detail: `${parsed.accepts.length} payment ${parsed.accepts.length === 1 ? "option" : "options"}` }
     : { level: "warn", label: "x402 v2", detail: `x402Version ${parsed.x402Version}` });
   if (parsed.accepts.length === 0) findings.push({ level: "fail", label: "Options", detail: "no payment options" });
+  if (!parsed.accepts.some((accept) => accept.scheme === "exact")) {
+    findings.push({ level: "fail", label: "Options", detail: "no exact payment option: cult checks and pays only the exact scheme" });
+  }
   const lookup = options.tokenAccount ?? solanaTokenAccount;
   for (const accept of parsed.accepts) {
     findings.push(...inspectAccept(accept));
     const network = networkOf(accept.network);
-    if (network?.family === "solana" && validPayTo(network, accept.payTo) && sameAsset(network, accept.asset)) {
+    if (accept.scheme === "exact" && network?.family === "solana" && validPayTo(network, accept.payTo) && sameAsset(network, accept.asset)) {
       const exists = (await lookup(network, accept.payTo)) ?? (await lookup(network, accept.payTo));
       findings.push(exists === true
         ? { level: "pass", label: network.name, detail: "payout has a USDC account" }
