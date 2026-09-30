@@ -62,10 +62,20 @@ export function decodePaymentRequired(header: string): unknown {
   return JSON.parse(Buffer.from(header, "base64").toString("utf8"));
 }
 
+const base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+export function isSolanaAddress(value: string): boolean {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) return false;
+  let number = 0n;
+  for (const char of value) number = number * 58n + BigInt(base58.indexOf(char));
+  let bytes = 0;
+  for (; number > 0n; number >>= 8n) bytes += 1;
+  const zeros = value.length - value.replace(/^1+/, "").length;
+  return bytes + zeros === 32;
+}
+
 function validPayTo(network: X402Network, payTo: string): boolean {
-  return network.family === "evm"
-    ? /^0x[0-9a-fA-F]{40}$/.test(payTo)
-    : /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(payTo);
+  return network.family === "evm" ? /^0x[0-9a-fA-F]{40}$/.test(payTo) : isSolanaAddress(payTo);
 }
 
 function sameAsset(network: X402Network, asset: string): boolean {
@@ -202,12 +212,12 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
     findings.push(...inspectAccept(accept));
     const network = networkOf(accept.network);
     if (network?.family === "solana" && validPayTo(network, accept.payTo) && sameAsset(network, accept.asset)) {
-      const exists = await lookup(network, accept.payTo);
+      const exists = (await lookup(network, accept.payTo)) ?? (await lookup(network, accept.payTo));
       findings.push(exists === true
         ? { level: "pass", label: network.name, detail: "payout has a USDC account" }
         : exists === false
           ? { level: "fail", label: network.name, detail: "payout has no USDC account yet, so payments to it fail: send it any amount of USDC once" }
-          : { level: "warn", label: network.name, detail: "could not confirm the payout has a USDC account" });
+          : { level: "fail", label: network.name, detail: "could not reach Solana to confirm the payout has a USDC account: run it again" });
     }
   }
   findings.push(parsed.extensions && "bazaar" in parsed.extensions

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { machineFiles, writeProject, x402Files, X402_VERSION } from "../src/build.js";
+import { machineFiles, validSolanaAddress, writeProject, x402Files, X402_VERSION } from "../src/build.js";
 import { runBuildMachine, runBuildX402 } from "../src/builder.js";
 
 const evm = "0x000000000000000000000000000000000000dEaD";
@@ -39,6 +39,14 @@ describe("cult build x402", () => {
     expect(files[".env.example"]).toContain("CDP_API_KEY_SECRET=\n");
     expect(files[".env"]).toContain("DESCRIPTION=\"Tides # and  quotes\"\n");
     expect(files[".env"]).toContain("X402_NETWORK=mainnet");
+  });
+
+  it("accepts only 32-byte Solana public keys", () => {
+    expect(validSolanaAddress(solana)).toBe(true);
+    expect(validSolanaAddress("3au3AcaDpXRJktuu8zWNWEBBufPN6tLSPiVJCsTgXcqn")).toBe(true);
+    expect(validSolanaAddress("z".repeat(44))).toBe(false);
+    expect(validSolanaAddress("1".repeat(32))).toBe(true);
+    expect(validSolanaAddress("0OIl".repeat(10))).toBe(false);
   });
 
   it("rejects bad payouts and prices", () => {

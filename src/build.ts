@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { isSolanaAddress } from "./x402.js";
 
 export const X402_VERSION = "2.28.0";
 export const COINBASE_X402_VERSION = "2.1.0";
@@ -44,7 +45,7 @@ export function validEvmAddress(value: string): boolean {
 }
 
 export function validSolanaAddress(value: string): boolean {
-  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+  return isSolanaAddress(value);
 }
 
 function json(value: unknown): string {

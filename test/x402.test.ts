@@ -116,8 +116,10 @@ describe("cult check", () => {
     expect(passed(missing)).toBe(false);
     const present = await checkEndpoint("https://api.example.com/data", { fetcher, tokenAccount: async () => true });
     expect(passed(present)).toBe(true);
-    const unknown = await checkEndpoint("https://api.example.com/data", { fetcher, tokenAccount: async () => undefined });
-    expect(passed(unknown)).toBe(true);
+    let lookups = 0;
+    const unknown = await checkEndpoint("https://api.example.com/data", { fetcher, tokenAccount: async () => { lookups += 1; return undefined; } });
+    expect(passed(unknown)).toBe(false);
+    expect(lookups).toBe(2);
   });
 
   it("formats USDC units and rejects non-base64 headers", () => {

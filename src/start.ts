@@ -241,6 +241,15 @@ export async function runStart(options: StartOptions = {}): Promise<boolean> {
   }
 
   stage(3, "ACP");
+  const installed = captured("acp", ["--version"]);
+  const installedVersion = installed.status === 0 ? installed.stdout.match(/\d+\.\d+\.\d+/)?.[0] : undefined;
+  if (installed.status === 0 && installedVersion !== ACP_CLI_VERSION) {
+    action(`ACP CLI ${installedVersion ?? "unknown version"} installed; cult is tested with ${ACP_CLI_VERSION}`);
+    if (!await confirm(`Install the Virtuals ACP CLI ${ACP_CLI_VERSION} now?`)) return paused();
+    if (!interactive("npm", ["install", "-g", `@virtuals-protocol/acp-cli@${ACP_CLI_VERSION}`], 5 * 60_000)) {
+      return fail("ACP CLI installation failed");
+    }
+  }
   if (!exists("acp")) {
     action("ACP CLI is not installed");
     if (!await confirm(`Install the Virtuals ACP CLI ${ACP_CLI_VERSION} now?`)) return paused();

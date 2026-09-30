@@ -80,7 +80,7 @@ function acpChecks(hasAcp: boolean): Check[] {
     ];
   }
 
-  const version = spawnSync("acp", ["--version"], { encoding: "utf8" }).stdout?.trim() ?? "";
+  const version = spawnSync("acp", ["--version"], { encoding: "utf8" }).stdout?.match(/\d+\.\d+\.\d+/)?.[0] ?? "";
   const cli: Check = version === ACP_CLI_VERSION
     ? { name: "ACP CLI", ok: true, detail: version }
     : { name: "ACP CLI", ok: false, detail: `${version || "unknown"} · tested with ${ACP_CLI_VERSION}: npm install -g @virtuals-protocol/acp-cli@${ACP_CLI_VERSION}` };
