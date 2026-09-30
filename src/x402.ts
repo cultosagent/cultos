@@ -208,7 +208,7 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
   }
   findings.push(parsed.x402Version === 2
     ? { level: "pass", label: "x402 v2", detail: `${parsed.accepts.length} payment ${parsed.accepts.length === 1 ? "option" : "options"}` }
-    : { level: "warn", label: "x402 v2", detail: `x402Version ${parsed.x402Version}` });
+    : { level: "fail", label: "x402 v2", detail: `x402Version ${parsed.x402Version}: cult checks and pays only x402 v2` });
   if (parsed.accepts.length === 0) findings.push({ level: "fail", label: "Options", detail: "no payment options" });
   if (!parsed.accepts.some((accept) => accept.scheme === "exact")) {
     findings.push({ level: "fail", label: "Options", detail: "no exact payment option: cult checks and pays only the exact scheme" });

@@ -121,6 +121,36 @@ describe("cult handshake", () => {
     expect(existsSync(log)).toBe(false);
   });
 
+  it("never pays a machine in check-only mode", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    process.env.X402_MQTT_BUYER_KEY = "0x" + "1".repeat(64);
+    const log = join(directory, "npx.log");
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho "$*" >> '${log}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    process.env.PATH = `${directory}:${previousPath}`;
+    try {
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true, checkOnly: true })).toBe(true);
+      expect(existsSync(log)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("counts a machine sale only with a real Base transaction", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    process.env.X402_MQTT_BUYER_KEY = "0x" + "1".repeat(64);
+    process.env.PATH = `${directory}:${previousPath}`;
+    try {
+      writeFileSync(join(directory, "npx"), "#!/bin/sh\necho 'no eip155:8453 option in the quote' >&2\nexit 1\n");
+      chmodSync(join(directory, "npx"), 0o755);
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).toBe(false);
+      writeFileSync(join(directory, "npx"), `#!/bin/sh\necho 'paid $0.001 · 1.9 load · tx ${tx}'\n`);
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
   it("asks for the buyer's own key for machines instead of holding one", async () => {
     const previous = process.env.X402_MQTT_BUYER_KEY;
     delete process.env.X402_MQTT_BUYER_KEY;

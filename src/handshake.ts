@@ -177,14 +177,14 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
   }
   const record = output as { status?: number; paymentMade?: boolean; headers?: Record<string, string>; error?: { message?: string } } | undefined;
   const settlement = settlementOf(record?.headers);
-  if (paid.status !== 0 || !(record?.paymentMade === true || settlement?.success === true)) {
+  if (paid.status !== 0 || settlement?.success !== true || !settlement.network) {
     const status = Number(record?.status);
     console.log(pc.red(`\nNo payment went through${Number.isInteger(status) ? ` (HTTP ${status})` : ""}.`));
     if (typeof record?.error?.message === "string") console.log(pc.dim(`awal: ${safe(record.error.message).slice(0, 300)}`));
     console.log(pc.dim("If awal is not signed in, run: awal auth login you@example.com\n"));
     return false;
   }
-  if (settlement?.network && !options402.some((accept) => accept.network === settlement.network)) {
+  if (!options402.some((accept) => accept.network === settlement.network)) {
     console.log(pc.red(`\nawal settled on ${safe(settlement.network)}, which is not one of the mainnet options above, so this is not a first sale.\n`));
     return false;
   }
@@ -201,6 +201,10 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
 }
 
 async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<boolean> {
+  if (options.checkOnly) {
+    console.log(pc.dim("\nMachines are not listed on HTTP marketplaces, so there is nothing to check. No payment made.\n"));
+    return true;
+  }
   const broker = options.broker ?? "mqtt://127.0.0.1:1883";
   const max = options.max ?? DEFAULT_CAP;
   capUnits(max);
@@ -216,8 +220,20 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
     console.log(pc.dim("No payment made.\n"));
     return false;
   }
-  const bought = spawnSync("npx", ["--yes", `@cultos/x402-mqtt@${X402_MQTT_VERSION}`, "buy", topic, "--broker", broker, "--max", max], { stdio: "inherit", timeout: 3 * 60_000 });
-  return bought.status === 0;
+  const bought = spawnSync("npx", ["--yes", `@cultos/x402-mqtt@${X402_MQTT_VERSION}`, "buy", topic, "--broker", broker, "--max", max], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3 * 60_000 });
+  const output = `${bought.stdout ?? ""}\n${bought.stderr ?? ""}`;
+  const transaction = output.match(/tx (0x[0-9a-fA-F]{64})/)?.[1];
+  if (bought.status !== 0 || !transaction) {
+    const reason = output.split("\n").map((line) => safe(line).trim()).filter(Boolean).pop();
+    console.log(pc.red("\nNo payment went through."));
+    if (reason) console.log(pc.dim(`x402-mqtt: ${reason.slice(0, 300)}`));
+    return false;
+  }
+  const paid = output.match(/paid \$[0-9.]+ · [^\n]*/)?.[0];
+  console.log(pc.green("\nFirst sale done on Base"));
+  if (paid) console.log(pc.dim(safe(paid).replace(/ · tx .*/, "")));
+  console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction)}\n`);
+  return true;
 }
 
 export async function runHandshake(target: string, options: HandshakeOptions): Promise<boolean> {

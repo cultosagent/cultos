@@ -80,6 +80,11 @@ describe("cult check", () => {
     expect(result.findings.find((finding) => finding.label === "Bazaar")?.level).toBe("fail");
   });
 
+  it("fails a challenge that is not x402 v2", async () => {
+    const v1 = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header({ ...good, x402Version: 1 }) } })) as typeof fetch;
+    expect(passed(await checkEndpoint("https://api.example.com/data", { fetcher: v1 }))).toBe(false);
+  });
+
   it("fails an unreadable payment header", async () => {
     const result = await checkEndpoint(`${origin}/garbage`);
     expect(passed(result)).toBe(false);
