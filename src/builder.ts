@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import pc from "picocolors";
 import {
   machineFiles,
+  validBroker,
   validEvmAddress,
   validName,
   validPrice,
@@ -97,7 +98,7 @@ export async function runBuildMachine(folder: string | undefined, flags: BuildFl
   const payout = await answer(asker, flags.payout, "Base payout address (0x…)?", undefined, validEvmAddress, "Use a 0x address you control. It only receives; no key is needed.");
   const price = await answer(asker, flags.price, "Price per reading in USD?", "0.001", validPrice, "Use a USD amount like 0.001.");
   const broker = device === "linux"
-    ? await answer(asker, flags.broker, "Broker URL (mqtts:// or wss://)?", undefined, (value) => /^(mqtts|wss|mqtt|ws):\/\/\S+$/.test(value), "Use a broker URL like mqtts://broker.example.com:8883.")
+    ? await answer(asker, flags.broker, "Broker URL (mqtts:// or wss://)?", undefined, validBroker, "Use mqtts:// or wss:// for a remote broker, like mqtts://broker.example.com:8883. Plain mqtt:// only works on this machine.")
     : undefined;
   const mainnet = flags.mainnet ?? false;
   const root = writeProject(folder ?? name, machineFiles({ name, device, payout, price, mainnet, broker }));

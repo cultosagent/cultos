@@ -82,7 +82,7 @@ describe("cult handshake", () => {
     const paid = await runHandshake(endpoint, { confirm: async () => true, max: "0.002", fetcher: quote });
     expect(paid).toBe(true);
     const calls = readFileSync(log, "utf8");
-    expect(calls).toContain(`x402 pay ${endpoint} -X GET --max-amount 2000 --json`);
+    expect(calls).toContain(`x402 pay ${endpoint} -X GET --max-amount 2000 --scheme exact --json`);
   });
 
   it("refuses when every option costs more than the cap", async () => {

@@ -105,7 +105,7 @@ function describe(accept: Accept): string {
 
 function payCommand(url: string, method: string, data: string | undefined, cap: bigint): string {
   const body = data ? ` -d '${data.replace(/'/g, "'\\''")}'` : "";
-  return `npx awal@${AWAL_VERSION} x402 pay ${url} -X ${method}${body} --max-amount ${cap}`;
+  return `npx awal@${AWAL_VERSION} x402 pay ${url} -X ${method}${body} --max-amount ${cap} --scheme exact`;
 }
 
 export async function ensureAwal(confirm: HandshakeOptions["confirm"]): Promise<boolean> {
@@ -162,7 +162,7 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
     return false;
   }
 
-  const args = ["x402", "pay", result.url, "-X", method, ...(options.data ? ["-d", options.data] : []), "--max-amount", cap.toString(), "--json"];
+  const args = ["x402", "pay", result.url, "-X", method, ...(options.data ? ["-d", options.data] : []), "--max-amount", cap.toString(), "--scheme", "exact", "--json"];
   console.log(pc.dim("Paying through awal…"));
   const paid = spawnSync("awal", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3 * 60_000 });
   let output: unknown;

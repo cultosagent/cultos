@@ -91,6 +91,16 @@ describe("cult build machine", () => {
     expect(JSON.parse(files["x402-mqtt.json"]!).facilitator).toBe("coinbase");
   });
 
+  it("never sends broker passwords in cleartext to a remote broker", async () => {
+    for (const broker of ["mqtt://broker.example.com:1883", "ws://10.0.0.5:9001/mqtt", "http://broker.example.com"]) {
+      expect(() => machineFiles({ name: "box", device: "linux", payout: evm, price: "0.001", mainnet: false, broker })).toThrow("mqtts://");
+      await expect(runBuildMachine(join(directory, `box-${broker.length}`), { device: "linux", payout: evm, broker })).rejects.toThrow();
+    }
+    for (const broker of ["mqtts://broker.example.com:8883", "wss://broker.example.com/mqtt", "mqtt://127.0.0.1:1883", "mqtt://localhost:1883"]) {
+      expect(() => machineFiles({ name: "box", device: "linux", payout: evm, price: "0.001", mainnet: false, broker })).not.toThrow();
+    }
+  });
+
   it("needs a broker for Linux", async () => {
     await expect(runBuildMachine(join(directory, "box"), { device: "linux", payout: evm })).rejects.toThrow("broker");
   });

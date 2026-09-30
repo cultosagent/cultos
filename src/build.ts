@@ -44,6 +44,18 @@ export function validEvmAddress(value: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
+export function validBroker(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "mqtts:" || url.protocol === "wss:") return Boolean(url.hostname);
+  if (url.protocol !== "mqtt:" && url.protocol !== "ws:") return false;
+  return url.hostname === "localhost" || url.hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
+}
+
 export function validSolanaAddress(value: string): boolean {
   return isSolanaAddress(value);
 }
@@ -237,6 +249,7 @@ npm start
   }
 
   if (!answers.broker) throw new Error("a Linux machine needs a broker URL");
+  if (!validBroker(answers.broker)) throw new Error("a remote broker must use mqtts:// or wss://; plain mqtt:// or ws:// only on this machine");
   const offers = [
     { topic: "server/uptime", price: answers.price, unit: "days", description: "Days since boot" },
     { topic: "server/cpu/load", price: answers.price, unit: "load", description: "CPU load, 1-minute average" },
