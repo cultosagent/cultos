@@ -92,7 +92,12 @@ async function start(confirm = vi.fn(async () => true)): Promise<{ ready: boolea
     confirm,
     wait: async () => undefined,
     launch,
-    allowNonInteractive: true
+    allowNonInteractive: true,
+    asker: {
+      ask: async () => "",
+      confirm: async () => false,
+      choose: async () => 2
+    }
   });
   return { ready, launch };
 }
@@ -195,7 +200,7 @@ describe("cult start", () => {
     renameSync(acp, template);
     executable("npm", [
       "case \"$*\" in",
-      `  'install -g @virtuals-protocol/acp-cli') /bin/cp '${template}' '${acp}'; /bin/chmod 755 '${acp}' ;;`,
+      `  'install -g @virtuals-protocol/acp-cli@1.0.39') /bin/cp '${template}' '${acp}'; /bin/chmod 755 '${acp}' ;;`,
       "  *) exit 1 ;;",
       "esac"
     ].join("\n"));
@@ -204,7 +209,7 @@ describe("cult start", () => {
     const result = await start(confirm);
 
     expect(result.ready).toBe(true);
-    expect(confirm).toHaveBeenCalledWith("Install the Virtuals ACP CLI now?");
+    expect(confirm).toHaveBeenCalledWith("Install the Virtuals ACP CLI 1.0.39 now?");
   });
 
   test("selects an existing agent when none is active", async () => {

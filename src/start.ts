@@ -3,7 +3,12 @@ import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
 import { z } from "zod";
 import { runBbs } from "./bbs.js";
+import { runBuildMachine, runBuildX402 } from "./builder.js";
 import { parseGitLawbRemote } from "./gitlawb.js";
+import { ensureAwal } from "./handshake.js";
+import { terminal, type Asker } from "./prompt.js";
+
+export const ACP_CLI_VERSION = "1.0.39";
 
 interface CommandResult {
   status: number;
@@ -16,6 +21,7 @@ interface StartOptions {
   wait?: () => Promise<void>;
   launch?: () => void;
   allowNonInteractive?: boolean;
+  asker?: Asker;
 }
 
 const agentSchema = z.object({
@@ -161,6 +167,22 @@ export async function runStart(options: StartOptions = {}): Promise<boolean> {
   const launch = options.launch ?? runBbs;
 
   console.log(pc.bold("\nCULT OS // SUMMONING RITUAL\n"));
+  const asker = options.asker ?? terminal;
+  const goal = await asker.choose("What do you want to do?", [
+    "Build a paid x402 API",
+    "Build a machine that sells its data",
+    "Hire agents for repo work (ACP)"
+  ]);
+  if (goal === 0) {
+    await runBuildX402(undefined, {}, asker);
+    await ensureAwal((question) => asker.confirm(question));
+    return true;
+  }
+  if (goal === 1) {
+    await runBuildMachine(undefined, {}, asker);
+    return true;
+  }
+
   console.log(pc.dim("ESTABLISHING CONNECTIONS"));
 
   stage(1, "REPOSITORY");
@@ -221,8 +243,8 @@ export async function runStart(options: StartOptions = {}): Promise<boolean> {
   stage(3, "ACP");
   if (!exists("acp")) {
     action("ACP CLI is not installed");
-    if (!await confirm("Install the Virtuals ACP CLI now?")) return paused();
-    if (!interactive("npm", ["install", "-g", "@virtuals-protocol/acp-cli"], 5 * 60_000)) {
+    if (!await confirm(`Install the Virtuals ACP CLI ${ACP_CLI_VERSION} now?`)) return paused();
+    if (!interactive("npm", ["install", "-g", `@virtuals-protocol/acp-cli@${ACP_CLI_VERSION}`], 5 * 60_000)) {
       return fail("ACP CLI installation failed");
     }
     if (!exists("acp")) return fail("ACP CLI is still unavailable after installation");

@@ -1,0 +1,123 @@
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { capUnits, explorer, findTransaction, listingStatus, runHandshake } from "../src/handshake.js";
+
+const payTo = "0x000000000000000000000000000000000000dEaD";
+const tx = `0x${"ab".repeat(32)}`;
+const header = Buffer.from(JSON.stringify({
+  x402Version: 2,
+  accepts: [{ scheme: "exact", network: "eip155:8453", amount: "1000", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo, maxTimeoutSeconds: 60 }],
+  extensions: { bazaar: {} }
+})).toString("base64");
+
+const endpoint = "https://api.example.com/data";
+const quote = (async (input: RequestInfo | URL) => String(input).startsWith("https://api.agentic.market")
+  ? new Response("", { status: 404 })
+  : new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header } })) as typeof fetch;
+
+let server: Server;
+let origin: string;
+let directory: string;
+let previousPath: string | undefined;
+
+beforeAll(async () => {
+  server = createServer((_request, response) => {
+    response.writeHead(402, { "PAYMENT-REQUIRED": header });
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+});
+
+afterAll(() => {
+  server.close();
+});
+
+beforeEach(() => {
+  directory = mkdtempSync(join(tmpdir(), "cultos-handshake-"));
+  previousPath = process.env.PATH;
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  process.env.PATH = previousPath;
+  vi.restoreAllMocks();
+  rmSync(directory, { recursive: true, force: true });
+});
+
+function fakeAwal(output: string): string {
+  const log = join(directory, "awal.log");
+  const path = join(directory, "awal");
+  writeFileSync(path, `#!/bin/sh\necho "$*" >> '${log}'\nif [ "$1" = "--version" ]; then echo 2.12.1; exit 0; fi\necho '${output}'\n`);
+  chmodSync(path, 0o755);
+  process.env.PATH = `${directory}:${previousPath}`;
+  return log;
+}
+
+describe("cult handshake", () => {
+  it("parses caps in USDC units", () => {
+    expect(capUnits("0.01")).toBe(10_000n);
+    expect(capUnits("1")).toBe(1_000_000n);
+    expect(() => capUnits("0.0000001")).toThrow("--max");
+  });
+
+  it("finds a transaction anywhere in a receipt and links the right explorer", () => {
+    expect(findTransaction({ data: { paymentResponse: { transaction: tx } } })).toBe(tx);
+    expect(findTransaction({ status: 200 })).toBeUndefined();
+    expect(explorer("eip155:8453", tx)).toBe(`https://basescan.org/tx/${tx}`);
+    expect(explorer("eip155:1", tx)).toBeUndefined();
+  });
+
+  it("pays through awal with the cap and never without confirmation", async () => {
+    const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:8453" })).toString("base64");
+    const log = fakeAwal(JSON.stringify({ status: 200, data: { ok: true }, headers: { "PAYMENT-RESPONSE": receipt } }));
+    const declined = await runHandshake(endpoint, { confirm: async () => false, fetcher: quote });
+    expect(declined).toBe(false);
+    expect(readFileSync(log, "utf8")).not.toContain("x402 pay");
+
+    const paid = await runHandshake(endpoint, { confirm: async () => true, max: "0.002", fetcher: quote });
+    expect(paid).toBe(true);
+    const calls = readFileSync(log, "utf8");
+    expect(calls).toContain(`x402 pay ${endpoint} -X GET --max-amount 2000 --json`);
+  });
+
+  it("refuses when every option costs more than the cap", async () => {
+    const log = fakeAwal("{}");
+    const result = await runHandshake(endpoint, { confirm: async () => true, max: "0.0005", fetcher: quote });
+    expect(result).toBe(false);
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it("reports a payment that did not go through", async () => {
+    fakeAwal(JSON.stringify({ success: false, error: { message: "insufficient balance" } }));
+    expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quote })).toBe(false);
+  });
+
+  it("never sends a first sale over plain http", async () => {
+    const log = fakeAwal("{}");
+    expect(await runHandshake(`${origin}/data`, { confirm: async () => true })).toBe(false);
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it("asks for the buyer's own key for machines instead of holding one", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    delete process.env.X402_MQTT_BUYER_KEY;
+    try {
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true })).toBe(false);
+    } finally {
+      if (previous !== undefined) process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("reads the Agentic Market listing", async () => {
+    const listed = async () => new Response(JSON.stringify({ endpoints: [{ url: "https://api.example.com/data" }] }), { status: 200 });
+    expect(await listingStatus("https://api.example.com/data", listed as typeof fetch)).toBe("listed on Agentic Market");
+    expect(await listingStatus("https://api.example.com/other", listed as typeof fetch)).toContain("endpoint not yet");
+    expect(await listingStatus("https://api.example.com/data", (async () => new Response("", { status: 404 })) as typeof fetch)).toContain("not on Agentic Market yet");
+    expect(await listingStatus("http://localhost:4021/data")).toContain("local only");
+  });
+});
