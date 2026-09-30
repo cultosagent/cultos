@@ -265,7 +265,7 @@ program
   .option("-d, --data <json>", "JSON request body")
   .option("--max <usd>", "spending cap in USD", "0.01")
   .option("--broker <url>", "MQTT broker for a machine topic")
-  .option("--pay-to <address>", "require the machine payout address to match the receipt")
+  .option("--pay-to <address>", "machine payout address the receipt must pay; defaults to payout in x402-mqtt.json")
   .option("--check", "only show whether it is listed")
   .option("-y, --yes", "pay without asking")
   .description("Prove a seller with one real, capped first sale")

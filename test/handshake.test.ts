@@ -4,13 +4,14 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { BASE_USDC, capUnits, confirmOnBase, explorer, findTransaction, listingStatus, runHandshake } from "../src/handshake.js";
+import { BASE_USDC, MACHINE_CONFIG, capUnits, configuredPayout, confirmOnBase, explorer, findTransaction, listingStatus, runHandshake, salePayout } from "../src/handshake.js";
 
 const payTo = "0x000000000000000000000000000000000000dEaD";
 const tx = `0x${"ab".repeat(32)}`;
 
 const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const buyerTopic = `0x${"0".repeat(24)}${"cd".repeat(20)}`;
+const machinePayout = `0x${"cd".repeat(20)}`;
 
 function receiptFetcher(result: unknown): typeof fetch {
   return (async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), {
@@ -181,11 +182,12 @@ describe("cult handshake", () => {
     try {
       writeFileSync(join(directory, "npx"), "#!/bin/sh\necho 'no eip155:8453 option in the quote' >&2\nexit 1\n");
       chmodSync(join(directory, "npx"), 0o755);
-      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).toBe(false);
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true, payTo: machinePayout })).toBe(false);
       writeFileSync(join(directory, "npx"), `#!/bin/sh\necho 'paid $0.001 · 1.9 load · tx ${tx}'\n`);
       expect(await runHandshake("mac/cpu/load", {
         confirm: async () => true,
         yes: true,
+        payTo: machinePayout,
         fetcher: receiptFetcher(settledReceipt)
       })).toBe(true);
     } finally {
@@ -206,7 +208,7 @@ describe("cult handshake", () => {
         logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, buyerTopic], data: "0x1" }]
       };
       expect(await runHandshake("mac/cpu/load", {
-        confirm: async () => true, yes: true, fetcher: receiptFetcher(wrongAmount)
+        confirm: async () => true, yes: true, payTo: machinePayout, fetcher: receiptFetcher(wrongAmount)
       })).toBe(false);
 
       const wrongPayee = {
@@ -241,6 +243,7 @@ describe("cult handshake", () => {
         expect(await runHandshake("mac/cpu/load", {
           confirm: async () => true,
           yes: true,
+          payTo: machinePayout,
           fetcher: receiptFetcher(result)
         })).toBe(false);
       }
@@ -250,11 +253,51 @@ describe("cult handshake", () => {
   });
 
   it("reads the payer and amount out of the USDC transfer log", async () => {
-    const confirmed = await confirmOnBase(tx, { units: 1000n }, receiptFetcher(settledReceipt));
+    const confirmed = await confirmOnBase(tx, { units: 1000n, payTo: machinePayout }, receiptFetcher(settledReceipt));
 
     expect(confirmed.settled).toBe(true);
     expect(confirmed.amount).toBe("1000");
     expect(confirmed.payer).toBe(`0x${"cd".repeat(20)}`);
+  });
+
+  it("needs the machine payout to prove the sale, and spends nothing while it has none", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    const working = process.cwd();
+    process.env.X402_MQTT_BUYER_KEY = "0x" + "1".repeat(64);
+    const log = join(directory, "npx.log");
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho "$*" >> '${log}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    process.env.PATH = `${directory}:${previousPath}`;
+    process.chdir(directory);
+    try {
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).toBe(false);
+      for (const bad of ["0xnope", `0x${"0".repeat(40)}`]) {
+        await expect(runHandshake("mac/cpu/load", { confirm: async () => true, yes: true, payTo: bad }))
+          .rejects.toThrow(/0x address/);
+      }
+      expect(existsSync(log)).toBe(false);
+
+      writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ payout: machinePayout, price: "0.001" }));
+      writeFileSync(join(directory, "npx"), `#!/bin/sh\necho 'paid $0.001 · 1.9 load · tx ${tx}'\n`);
+      expect(await runHandshake("mac/cpu/load", {
+        confirm: async () => true, yes: true, fetcher: receiptFetcher(settledReceipt)
+      })).toBe(true);
+    } finally {
+      process.chdir(working);
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("takes the payout from the machine project only when the file really carries one", () => {
+    expect(configuredPayout(directory)).toBeUndefined();
+    for (const content of ["not json", JSON.stringify({ price: "0.001" }), JSON.stringify({ payout: 7 }), JSON.stringify({ payout: `0x${"0".repeat(40)}` })]) {
+      writeFileSync(join(directory, MACHINE_CONFIG), content);
+      expect(configuredPayout(directory)).toBeUndefined();
+    }
+    writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ payout: machinePayout }));
+    expect(configuredPayout(directory)).toBe(machinePayout);
+    expect(salePayout(undefined, directory)).toBe(machinePayout);
+    expect(salePayout(payTo, directory)).toBe(payTo);
   });
 
   it("refuses a broker or topic that the paying path should not accept", async () => {

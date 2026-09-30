@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import pc from "picocolors";
 import { safe } from "./display.js";
 import { commandExists } from "./github.js";
 import { validBroker, X402_MQTT_VERSION } from "./build.js";
-import { checkEndpoint, decodeBase64, formatUsdc, isLocal, networkOf, passed, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
+import { checkEndpoint, decodeBase64, formatUsdc, isEvmAddress, isLocal, networkOf, passed, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
 
 export const AWAL_VERSION = "2.12.1";
 export const DEFAULT_CAP = "0.01";
@@ -135,7 +137,25 @@ export interface BaseReceipt {
 
 export interface SaleTerms {
   units: bigint;
-  payTo?: string | undefined;
+  payTo: string;
+}
+
+export const MACHINE_CONFIG = "x402-mqtt.json";
+
+export function configuredPayout(folder: string = process.cwd()): string | undefined {
+  let payout: unknown;
+  try {
+    payout = (JSON.parse(readFileSync(join(folder, MACHINE_CONFIG), "utf8")) as { payout?: unknown }).payout;
+  } catch {
+    return undefined;
+  }
+  return typeof payout === "string" && isEvmAddress(payout) ? payout : undefined;
+}
+
+export function salePayout(flag: string | undefined, folder?: string): string | undefined {
+  if (flag === undefined) return configuredPayout(folder);
+  if (!isEvmAddress(flag)) throw new Error("--pay-to must be a 0x address on Base that is not the zero address");
+  return flag;
 }
 
 export async function confirmOnBase(
@@ -179,15 +199,9 @@ export async function confirmOnBase(
 
     if (transfers.length === 0) return { settled: false, reason: "no USDC transfer in that transaction" };
     const matched = transfers.find((transfer) =>
-      transfer.value === sale.units
-      && (!sale.payTo || transfer.to.toLowerCase() === sale.payTo.toLowerCase()));
+      transfer.value === sale.units && transfer.to.toLowerCase() === sale.payTo.toLowerCase());
     if (!matched) {
-      return {
-        settled: false,
-        reason: sale.payTo
-          ? `no USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo} in that transaction`
-          : `no USDC transfer of ${formatUsdc(sale.units.toString())} in that transaction`
-      };
+      return { settled: false, reason: `no USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo} in that transaction` };
     }
     return {
       settled: true,
@@ -310,8 +324,15 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   if (!validBroker(broker)) {
     throw new Error("a remote broker must use mqtts:// or wss://; plain mqtt:// or ws:// only on this machine");
   }
+  const payTo = salePayout(options.payTo);
   console.log(pc.bold("\nCULT OS // HANDSHAKE\n"));
-  console.log(`${pc.dim("topic")}   ${topic}\n${pc.dim("broker")}  ${broker}\n${pc.dim("cap")}     ${max} USDC\n`);
+  console.log(`${pc.dim("topic")}   ${topic}\n${pc.dim("broker")}  ${broker}\n${pc.dim("cap")}     ${max} USDC`);
+  if (!payTo) {
+    console.log(pc.yellow("\nA first sale has to prove where the money landed, so it needs the machine's payout address."));
+    console.log(pc.dim(`Run this inside the project cult build machine made, which records payout in ${MACHINE_CONFIG}, or pass --pay-to <address>.\n`));
+    return false;
+  }
+  console.log(`${pc.dim("payout")}  ${payTo}\n`);
   if (!process.env.X402_MQTT_BUYER_KEY) {
     console.log(pc.yellow("Machines are paid with your own small-balance buyer wallet. Load its key without typing it into your shell history, then run again:"));
     console.log("  read -rs X402_MQTT_BUYER_KEY && export X402_MQTT_BUYER_KEY");
@@ -337,11 +358,7 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
     return false;
   }
   console.log(pc.dim("Confirming the receipt on Base…"));
-  const receipt = await confirmOnBase(
-    transaction,
-    { units: capUnits(reported), ...(options.payTo ? { payTo: options.payTo } : {}) },
-    options.fetcher
-  );
+  const receipt = await confirmOnBase(transaction, { units: capUnits(reported), payTo }, options.fetcher);
   if (!receipt.settled) {
     console.log(pc.red(`\nx402-mqtt reported a payment that Base does not confirm: ${safe(receipt.reason ?? "unknown")}.`));
     console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction) ?? safe(transaction)}\n`);
@@ -352,9 +369,6 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   if (paid) console.log(pc.dim(safe(paid).replace(/ · tx .*/, "")));
   if (receipt.amount) {
     console.log(`${pc.dim("settled")}  ${formatUsdc(receipt.amount)} USDC from ${safe(receipt.payer ?? "")} to ${safe(receipt.payee ?? "")}`);
-  }
-  if (!options.payTo) {
-    console.log(pc.dim("Pass --pay-to <address> to also require the payout address to match."));
   }
   console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction)}\n`);
   return true;
