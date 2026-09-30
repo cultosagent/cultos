@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cell, plain, safe } from "../src/display.js";
+import { cell, chunk, plain, safe, truncate, width } from "../src/display.js";
 
 const ESC = "\u001b";
 
@@ -54,5 +54,52 @@ describe("cell", () => {
 
   it("collapses a value that would break out of its row", () => {
     expect(cell("url |\n| Result | **completed**")).toBe("url \\|\\| Result \\| **completed**");
+  });
+});
+
+describe("width", () => {
+  it("counts ascii as one column each", () => {
+    expect(width("hello")).toBe(5);
+  });
+
+  it("counts a CJK character as the two columns a terminal draws", () => {
+    // String.length says 3 here, which is why the frame border used to drift.
+    expect("\u65e5\u672c\u8a9e".length).toBe(3);
+    expect(width("\u65e5\u672c\u8a9e")).toBe(6);
+  });
+
+  it("counts an emoji cluster as two columns however many code units it is", () => {
+    expect(width("\u{1F600}")).toBe(2);
+    expect("\u{1F469}\u200d\u{1F4BB}".length).toBe(5);
+    expect(width("\u{1F469}\u200d\u{1F4BB}")).toBe(2);
+  });
+
+  it("ignores escape-free control characters that safe() would remove", () => {
+    expect(width("")).toBe(0);
+  });
+});
+
+describe("truncate", () => {
+  it("never splits a wide character", () => {
+    expect(truncate("\u65e5\u672c\u8a9e", 4)).toBe("\u65e5\u672c");
+    expect(truncate("\u65e5\u672c\u8a9e", 5)).toBe("\u65e5\u672c");
+  });
+
+  it("never splits a joined emoji into its parts", () => {
+    expect(truncate("\u{1F469}\u200d\u{1F4BB}ab", 3)).toBe("\u{1F469}\u200d\u{1F4BB}a");
+  });
+
+  it("returns nothing for a non-positive width", () => {
+    expect(truncate("anything", 0)).toBe("");
+  });
+});
+
+describe("chunk", () => {
+  it("splits on column count, not code units", () => {
+    expect(chunk("\u65e5\u672c\u8a9e\u3067\u3059", 4)).toEqual(["\u65e5\u672c", "\u8a9e\u3067", "\u3059"]);
+  });
+
+  it("returns one empty run for an empty string", () => {
+    expect(chunk("", 10)).toEqual([""]);
   });
 });

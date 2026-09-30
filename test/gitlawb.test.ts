@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getGitLawbIssue,
   getGitLawbPullRequest,
@@ -12,6 +12,13 @@ import {
 
 const originalPath = process.env.PATH;
 let bin: string;
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
 
 function executable(name: string, body: string): void {
   const path = join(bin, name);
@@ -37,17 +44,34 @@ if [ "$1" = "ls-remote" ]; then
 else
   exit 1
 fi`);
-  executable("curl", `
-for argument in "$@"; do url="$argument"; done
-case "$url" in
-  */pulls/1) printf '%s\\n' '{"number":1,"source_branch":"feature/fix","target_branch":"main","status":"open"}' ;;
-  */certs) printf '%s\\n' '{"certificates":[{"id":"abcdef12","ref_name":"refs/heads/feature/fix","new_sha":"abc1234567890000000000000000000000000000"}]}' ;;
-  *) exit 1 ;;
-esac`);
+  // The node is reached with fetch, so it is mocked here rather than stubbed as
+  // a curl executable on PATH. The test no longer depends on an external binary.
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+    const url = String(input);
+    if (url.endsWith("/pulls/1")) {
+      return jsonResponse({
+        number: 1,
+        source_branch: "feature/fix",
+        target_branch: "main",
+        status: "open"
+      });
+    }
+    if (url.endsWith("/certs")) {
+      return jsonResponse({
+        certificates: [{
+          id: "abcdef12",
+          ref_name: "refs/heads/feature/fix",
+          new_sha: "abc1234567890000000000000000000000000000"
+        }]
+      });
+    }
+    return new Response("not found", { status: 404 });
+  }));
 });
 
 afterEach(() => {
   process.env.PATH = originalPath;
+  vi.unstubAllGlobals();
 });
 
 describe("GitLawb adapter", () => {
@@ -71,8 +95,8 @@ describe("GitLawb adapter", () => {
     });
   });
 
-  it("reads pull requests and verifies signed pushes", () => {
-    const pullRequest = getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1");
+  it("reads pull requests and verifies signed pushes", async () => {
+    const pullRequest = await getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1");
     expect(pullRequest).toMatchObject({
       number: 1,
       state: "OPEN",
@@ -80,37 +104,98 @@ describe("GitLawb adapter", () => {
       baseRef: "main",
       headSha: "abc1234567890000000000000000000000000000"
     });
-    expect(getGitLawbVerificationChecks(pullRequest)).toEqual([
+    expect(await getGitLawbVerificationChecks(pullRequest)).toEqual([
       { name: "Signed push certificate", state: "verified", bucket: "pass" }
     ]);
   });
 
-  it("refuses to trust a plaintext GitLawb node", () => {
+  it("refuses to trust a plaintext GitLawb node", async () => {
     const node = process.env.GITLAWB_NODE;
     try {
       process.env.GITLAWB_NODE = "http://node.example.com";
-      expect(() => getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
-        .toThrow(/must use https/);
+      await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+        .rejects.toThrow(/must use https/);
 
       process.env.GITLAWB_NODE = "not a url";
-      expect(() => getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
-        .toThrow(/not a valid URL/);
+      await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+        .rejects.toThrow(/not a valid URL/);
     } finally {
       if (node === undefined) delete process.env.GITLAWB_NODE;
       else process.env.GITLAWB_NODE = node;
     }
   });
 
-  it("allows a loopback node for local development", () => {
+  it("allows a loopback node for local development", async () => {
     const node = process.env.GITLAWB_NODE;
     try {
       process.env.GITLAWB_NODE = "http://localhost:8080";
-      expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
-        .toMatchObject({ number: 1, state: "OPEN" });
+      await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+        .resolves.toMatchObject({ number: 1, state: "OPEN" });
     } finally {
       if (node === undefined) delete process.env.GITLAWB_NODE;
       else process.env.GITLAWB_NODE = node;
     }
+  });
+
+  it("follows an https redirect the way curl was told to", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.startsWith("https://node.gitlawb.com")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://moved.gitlawb.com/api/v1/x/pulls/1" }
+        });
+      }
+      return jsonResponse({
+        number: 1,
+        source_branch: "feature/fix",
+        target_branch: "main",
+        status: "open"
+      });
+    }));
+
+    await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+      .resolves.toMatchObject({ number: 1 });
+  });
+
+  it("refuses a redirect that would downgrade the connection", async () => {
+    // curl enforced this with --proto-redir =https. A node that can be pushed
+    // off https chooses the verification result, which decides settlement.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "http://evil.example/api/v1/x/pulls/1" }
+    })));
+
+    await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+      .rejects.toThrow(/not secure/);
+  });
+
+  it("stops after too many redirects", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://node.gitlawb.com/api/v1/x/pulls/1" }
+    })));
+
+    await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+      .rejects.toThrow(/too many times/);
+  });
+
+  it("reports a node that never answers instead of hanging", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const timeout = new Error("The operation was aborted due to timeout");
+      timeout.name = "TimeoutError";
+      throw timeout;
+    }));
+
+    await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+      .rejects.toThrow(/did not respond within 30 seconds/);
+  });
+
+  it("reports a failing status rather than parsing the body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 503 })));
+
+    await expect(getGitLawbPullRequest("gitlawb://did:key:z6MkOwner/example/pull/1"))
+      .rejects.toThrow(/status 503/);
   });
 
   it("rejects an issue reference that would read as a flag", () => {

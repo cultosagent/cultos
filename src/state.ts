@@ -1,6 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { deliveryUrl, httpsUrl, plainText } from "./contract.js";
@@ -250,6 +260,94 @@ function writeState(state: CultState): void {
   cachedState = state;
 }
 
+const lockPollMs = 25;
+const lockWaitMs = 5_000;
+const lockStaleMs = 30_000;
+
+/** Sleep without yielding, because the state API is synchronous. */
+function pause(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function isCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+/**
+ * Take the write lock for this repository's state file.
+ *
+ * Reading, mutating and writing were three separate steps with nothing between
+ * them, so two commands running at once each wrote a whole file built from what
+ * they read before the other started, and the first write was lost. `cult watch`
+ * in one terminal and `cult fund` in another is enough to hit it.
+ *
+ * `wx` is the mutex: the create fails if the file is already there. A lock left
+ * behind by a killed process would otherwise wedge every later command, so one
+ * older than lockStaleMs is reclaimed.
+ */
+function acquireLock(): number {
+  const path = `${statePath()}.lock`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + lockWaitMs;
+
+  for (;;) {
+    try {
+      const descriptor = openSync(path, "wx", 0o600);
+      writeFileSync(descriptor, `${process.pid}\n`);
+      return descriptor;
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) throw error;
+
+      try {
+        if (Date.now() - statSync(path).mtimeMs > lockStaleMs) {
+          unlinkSync(path);
+          continue;
+        }
+      } catch (staleError) {
+        // Released between the failed create and the stat: just try again.
+        if (!isCode(staleError, "ENOENT")) throw staleError;
+        continue;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for ${path}. Another CultOS command is writing job state; `
+          + "retry once it finishes, or remove that file if no other command is running."
+        );
+      }
+      pause(lockPollMs);
+    }
+  }
+}
+
+function releaseLock(descriptor: number): void {
+  try {
+    closeSync(descriptor);
+  } finally {
+    try {
+      unlinkSync(`${statePath()}.lock`);
+    } catch (error) {
+      if (!isCode(error, "ENOENT")) throw error;
+    }
+  }
+}
+
+/**
+ * Run a read-modify-write against the state file with nobody else in it.
+ *
+ * The cache is dropped on entry: it is only sound because each command is one
+ * short-lived process, and another process may have written since it was filled.
+ */
+function withLock<T>(change: () => T): T {
+  const descriptor = acquireLock();
+  cachedState = undefined;
+  try {
+    return change();
+  } finally {
+    releaseLock(descriptor);
+  }
+}
+
 export function jobReference(job: {
   issueNumber: number | string;
   service?: "review" | undefined;
@@ -257,12 +355,16 @@ export function jobReference(job: {
   return job.service === "review" ? `${job.issueNumber}:review` : String(job.issueNumber);
 }
 
-export function saveJob(job: CultJob): void {
-  assertStorableJobReference(job.issueNumber);
+function storeJob(job: CultJob): void {
   const state = readState();
   const jobs = Object.assign(Object.create(null) as CultState["jobs"], state.jobs);
   jobs[jobReference(job)] = job;
   writeState({ ...state, jobs });
+}
+
+export function saveJob(job: CultJob): void {
+  assertStorableJobReference(job.issueNumber);
+  withLock(() => storeJob(job));
 }
 
 export function getJob(issueNumber: number | string): CultJob {
@@ -276,14 +378,20 @@ export function getJob(issueNumber: number | string): CultJob {
 }
 
 export function updateJob(issueNumber: number | string, update: Partial<CultJob>): CultJob {
-  const job = getJob(issueNumber);
-  const next = {
-    ...job,
-    ...update,
-    updatedAt: new Date().toISOString()
-  };
-  saveJob(next);
-  return next;
+  // The read has to happen inside the lock as well. Reading first and locking
+  // only to write would still merge the update onto a job another command had
+  // already changed.
+  return withLock(() => {
+    const job = getJob(issueNumber);
+    const next = {
+      ...job,
+      ...update,
+      updatedAt: new Date().toISOString()
+    };
+    assertStorableJobReference(next.issueNumber);
+    storeJob(next);
+    return next;
+  });
 }
 
 export function listJobs(): CultJob[] {
