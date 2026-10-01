@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { BASE_USDC, MACHINE_CONFIG, capUnits, configuredPayout, confirmOnBase, explorer, findTransaction, listingStatus, runHandshake, salePayout } from "../src/handshake.js";
+import { BASE_RPC, BASE_USDC, MACHINE_CONFIG, capUnits, configuredPayout, confirmOnBase, explorer, findTransaction, listingStatus, runHandshake, salePayout } from "../src/handshake.js";
 
 const payTo = "0x000000000000000000000000000000000000dEaD";
 const tx = `0x${"ab".repeat(32)}`;
@@ -12,6 +12,14 @@ const tx = `0x${"ab".repeat(32)}`;
 const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const buyerTopic = `0x${"0".repeat(24)}${"cd".repeat(20)}`;
 const machinePayout = `0x${"cd".repeat(20)}`;
+const deadTopic = `0x${"0".repeat(24)}${payTo.slice(2).toLowerCase()}`;
+
+const solanaMainnet = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+const solanaRpc = "https://api.mainnet-beta.solana.com";
+const solanaMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const solanaPayout = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+const solanaBuyer = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const signature = "5".repeat(88);
 
 function receiptFetcher(result: unknown): typeof fetch {
   return (async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), {
@@ -32,9 +40,43 @@ const header = Buffer.from(JSON.stringify({
 })).toString("base64");
 
 const endpoint = "https://api.example.com/data";
-const quote = (async (input: RequestInfo | URL) => String(input).startsWith("https://api.agentic.market")
-  ? new Response("", { status: 404 })
-  : new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header } })) as typeof fetch;
+const saleOnBase = {
+  status: "0x1",
+  logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, deadTopic], data: "0x3e8" }]
+};
+
+const solanaHeader = Buffer.from(JSON.stringify({
+  x402Version: 2,
+  accepts: [{ scheme: "exact", network: solanaMainnet, amount: "1000", asset: solanaMint, payTo: solanaPayout, maxTimeoutSeconds: 60 }],
+  extensions: { bazaar: { info: { input: { type: "object" }, output: { type: "object" } }, schema: {} } }
+})).toString("base64");
+
+function json(result: unknown): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function quoting(receipt: unknown = saleOnBase): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith("https://api.agentic.market")) return new Response("", { status: 404 });
+    if (url === BASE_RPC) return json(receipt);
+    return new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header } });
+  }) as typeof fetch;
+}
+
+function solanaQuoting(statuses: unknown, transaction: unknown): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("https://api.agentic.market")) return new Response("", { status: 404 });
+    if (url === solanaRpc) {
+      const { method } = JSON.parse(String(init?.body)) as { method: string };
+      return json(method === "getSignatureStatuses" ? statuses : transaction);
+    }
+    return new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": solanaHeader } });
+  }) as typeof fetch;
+}
+
+const quote = quoting();
 
 let server: Server;
 let origin: string;
@@ -91,7 +133,7 @@ describe("cult handshake", () => {
 
   it("pays through awal with the cap and never without confirmation", async () => {
     const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:8453" })).toString("base64");
-    const log = fakeAwal(JSON.stringify({ status: 200, data: { ok: true }, headers: { "PAYMENT-RESPONSE": receipt } }));
+    const log = fakeAwal(JSON.stringify({ status: 200, paymentMade: true, data: { ok: true }, headers: { "PAYMENT-RESPONSE": receipt } }));
     const declined = await runHandshake(endpoint, { confirm: async () => false, fetcher: quote });
     expect(declined).toBe(false);
     expect(readFileSync(log, "utf8")).not.toContain("x402 pay");
@@ -131,6 +173,64 @@ describe("cult handshake", () => {
     const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:84532" })).toString("base64");
     fakeAwal(JSON.stringify({ status: 200, headers: { "PAYMENT-RESPONSE": receipt } }));
     expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quote })).toBe(false);
+  });
+
+  it("never takes the seller's PAYMENT-RESPONSE as proof that awal paid", async () => {
+    const forged = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:8453" })).toString("base64");
+    for (const claim of [{}, { paymentMade: false }]) {
+      fakeAwal(JSON.stringify({ status: 200, ...claim, headers: { "PAYMENT-RESPONSE": forged } }));
+      expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quoting() })).toBe(false);
+    }
+  });
+
+  it("matches the HTTP receipt to the quote, not to the header", async () => {
+    const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:8453" })).toString("base64");
+    const awal = JSON.stringify({ status: 200, paymentMade: true, headers: { "PAYMENT-RESPONSE": receipt } });
+    const elsewhere = `0x${"0".repeat(24)}${"ef".repeat(20)}`;
+    for (const onChain of [
+      { status: "0x1", logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, deadTopic], data: "0x1" }] },
+      { status: "0x1", logs: [{ address: BASE_USDC, topics: [transferTopic, buyerTopic, elsewhere], data: "0x3e8" }] },
+      { status: "0x1", logs: [] },
+      { status: "0x0", logs: [] }
+    ]) {
+      fakeAwal(awal);
+      expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quoting(onChain) })).toBe(false);
+    }
+    fakeAwal(awal);
+    expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quoting() })).toBe(true);
+  });
+
+  it("confirms a Solana first sale from the token balances it moved", async () => {
+    const receipt = Buffer.from(JSON.stringify({ success: true, transaction: signature, network: solanaMainnet })).toString("base64");
+    const awal = JSON.stringify({ status: 200, paymentMade: true, headers: { "PAYMENT-RESPONSE": receipt } });
+    const balance = (owner: string, accountIndex: number, amount: string) => ({ accountIndex, mint: solanaMint, owner, uiTokenAmount: { amount } });
+    const moved = {
+      meta: {
+        preTokenBalances: [balance(solanaPayout, 1, "0"), balance(solanaBuyer, 2, "5000")],
+        postTokenBalances: [balance(solanaPayout, 1, "1000"), balance(solanaBuyer, 2, "4000")]
+      }
+    };
+    const short = {
+      meta: {
+        preTokenBalances: [balance(solanaPayout, 1, "0"), balance(solanaBuyer, 2, "5000")],
+        postTokenBalances: [balance(solanaPayout, 1, "999"), balance(solanaBuyer, 2, "4001")]
+      }
+    };
+    const confirmed = { value: [{ err: null, confirmationStatus: "finalized" }] };
+    const lookup = { confirm: async () => true, tokenAccount: async () => true };
+
+    fakeAwal(awal);
+    expect(await runHandshake(endpoint, { ...lookup, fetcher: solanaQuoting(confirmed, moved) })).toBe(true);
+
+    for (const [statuses, transaction] of [
+      [confirmed, short],
+      [{ value: [{ err: { InstructionError: [0, "Custom"] }, confirmationStatus: "finalized" }], }, moved],
+      [{ value: [{ err: null, confirmationStatus: "processed" }] }, moved],
+      [{ value: [null] }, moved]
+    ] as const) {
+      fakeAwal(awal);
+      expect(await runHandshake(endpoint, { ...lookup, fetcher: solanaQuoting(statuses, transaction) })).toBe(false);
+    }
   });
 
   it("never counts a testnet payment as the first sale", async () => {

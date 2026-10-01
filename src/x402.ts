@@ -145,8 +145,12 @@ const solanaRpc: Record<string, string> = {
   "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "https://api.devnet.solana.com"
 };
 
+export function solanaRpcFor(id: string): string | undefined {
+  return Object.hasOwn(solanaRpc, id) && typeof solanaRpc[id] === "string" ? solanaRpc[id] : undefined;
+}
+
 export const solanaTokenAccount: TokenAccountLookup = async (network, owner) => {
-  const rpc = solanaRpc[network.id];
+  const rpc = solanaRpcFor(network.id);
   if (!rpc) return undefined;
   try {
     const response = await fetch(rpc, {
@@ -250,12 +254,16 @@ export async function checkEndpoint(target: string, options: CheckOptions = {}):
   return { url: url.href, status: 402, paymentRequired: parsed, findings };
 }
 
+function isObject(value: unknown): boolean {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function hasBazaarMetadata(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
+  if (!isObject(value)) return false;
   const info = (value as { info?: unknown }).info;
-  if (!info || typeof info !== "object") return false;
+  if (!isObject(info)) return false;
   const described = info as { input?: unknown; output?: unknown };
-  return Boolean(described.input) || Boolean(described.output);
+  return isObject(described.input) || isObject(described.output);
 }
 
 export function passed(result: CheckResult): boolean {

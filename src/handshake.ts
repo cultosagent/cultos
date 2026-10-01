@@ -5,7 +5,7 @@ import pc from "picocolors";
 import { safe } from "./display.js";
 import { commandExists } from "./github.js";
 import { validBroker, X402_MQTT_VERSION } from "./build.js";
-import { checkEndpoint, decodeBase64, formatUsdc, isEvmAddress, isLocal, networkOf, passed, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
+import { checkEndpoint, decodeBase64, formatUsdc, isEvmAddress, isLocal, networkOf, passed, solanaRpcFor, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
 
 export const AWAL_VERSION = "2.12.1";
 export const DEFAULT_CAP = "0.01";
@@ -127,7 +127,22 @@ export const BASE_RPC = "https://mainnet.base.org";
 export const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-export interface BaseReceipt {
+async function rpcCall(rpc: string, method: string, params: unknown[], fetcher: typeof fetch): Promise<unknown> {
+  try {
+    const response = await fetcher(rpc, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (!response.ok) return undefined;
+    return (await response.json() as { result?: unknown }).result;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface SettlementReceipt {
   settled: boolean;
   reason?: string;
   payer?: string;
@@ -163,22 +178,11 @@ export async function confirmOnBase(
   sale: SaleTerms,
   fetcher: typeof fetch = fetch,
   attempts = 5
-): Promise<BaseReceipt> {
+): Promise<SettlementReceipt> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 2_000));
-    let receipt: { status?: unknown; logs?: unknown } | null | undefined;
-    try {
-      const response = await fetcher(BASE_RPC, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [transaction] }),
-        signal: AbortSignal.timeout(15_000)
-      });
-      if (!response.ok) continue;
-      receipt = (await response.json() as { result?: { status?: unknown; logs?: unknown } | null }).result;
-    } catch {
-      continue;
-    }
+    const receipt = await rpcCall(BASE_RPC, "eth_getTransactionReceipt", [transaction], fetcher) as
+      { status?: unknown; logs?: unknown } | null | undefined;
     if (!receipt) continue;
     if (receipt.status !== "0x1") return { settled: false, reason: "the transaction reverted on Base" };
 
@@ -211,6 +215,72 @@ export async function confirmOnBase(
     };
   }
   return { settled: false, reason: `no receipt on Base mainnet for ${transaction}` };
+}
+
+interface TokenMove {
+  owner: string;
+  delta: bigint;
+}
+
+function tokenMoves(before: unknown, after: unknown, mint: string): TokenMove[] {
+  const held = (value: unknown) => (Array.isArray(value) ? value : []).flatMap((entry) => {
+    const balance = entry as { accountIndex?: unknown; mint?: unknown; owner?: unknown; uiTokenAmount?: { amount?: unknown } };
+    const amount = balance.uiTokenAmount?.amount;
+    if (balance.mint !== mint || typeof balance.owner !== "string" || typeof balance.accountIndex !== "number") return [];
+    if (typeof amount !== "string" || !/^\d+$/.test(amount)) return [];
+    return [{ index: balance.accountIndex, owner: balance.owner, amount: BigInt(amount) }];
+  });
+  const opening = new Map(held(before).map((entry) => [entry.index, entry.amount]));
+  return held(after).map((entry) => ({ owner: entry.owner, delta: entry.amount - (opening.get(entry.index) ?? 0n) }));
+}
+
+export interface SolanaSale extends SaleTerms {
+  mint: string;
+}
+
+export async function confirmOnSolana(
+  signature: string,
+  sale: SolanaSale,
+  networkId: string,
+  fetcher: typeof fetch = fetch,
+  attempts = 5
+): Promise<SettlementReceipt> {
+  const rpc = solanaRpcFor(networkId);
+  if (!rpc) return { settled: false, reason: "cult has no Solana RPC for that network" };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const statuses = await rpcCall(rpc, "getSignatureStatuses", [[signature], { searchTransactionHistory: true }], fetcher) as
+      { value?: ({ err?: unknown; confirmationStatus?: unknown } | null)[] } | undefined;
+    const status = statuses?.value?.[0];
+    if (!status) continue;
+    if (status.err) return { settled: false, reason: "the transaction failed on Solana" };
+    if (status.confirmationStatus !== "confirmed" && status.confirmationStatus !== "finalized") continue;
+
+    const confirmed = await rpcCall(rpc, "getTransaction", [signature, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }], fetcher) as
+      { meta?: { preTokenBalances?: unknown; postTokenBalances?: unknown } } | null | undefined;
+    if (!confirmed?.meta) continue;
+    const moves = tokenMoves(confirmed.meta.preTokenBalances, confirmed.meta.postTokenBalances, sale.mint);
+    if (!moves.some((move) => move.owner === sale.payTo && move.delta === sale.units)) {
+      return { settled: false, reason: `no USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo} in that transaction` };
+    }
+    const payer = moves.find((move) => move.delta === -sale.units);
+    return {
+      settled: true,
+      payee: sale.payTo,
+      amount: sale.units.toString(),
+      ...(payer ? { payer: payer.owner } : {})
+    };
+  }
+  return { settled: false, reason: `no confirmed transaction on Solana for ${signature}` };
+}
+
+export async function confirmSale(accept: Accept, transaction: string, fetcher: typeof fetch = fetch): Promise<SettlementReceipt> {
+  const network = networkOf(accept.network);
+  if (!network) return { settled: false, reason: "cult does not settle on that network" };
+  const sale: SaleTerms = { units: BigInt(accept.amount), payTo: accept.payTo };
+  if (network.family === "solana") return confirmOnSolana(transaction, { ...sale, mint: network.usdc }, network.id, fetcher);
+  if (network.id !== "eip155:8453") return { settled: false, reason: `cult confirms EVM sales on Base only, not ${network.name}` };
+  return confirmOnBase(transaction, sale, fetcher);
 }
 
 export async function ensureAwal(confirm: HandshakeOptions["confirm"]): Promise<boolean> {
@@ -282,31 +352,39 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
   }
   const record = output as { status?: number; paymentMade?: boolean; headers?: Record<string, string>; error?: { message?: string } } | undefined;
   const settlement = settlementOf(record?.headers);
-  if (paid.status !== 0 || settlement?.success !== true || !settlement.network) {
+  if (paid.status !== 0 || record?.paymentMade !== true || settlement?.success !== true || !settlement.network) {
     const status = Number(record?.status);
     console.log(pc.red(`\nNo payment went through${Number.isInteger(status) ? ` (HTTP ${status})` : ""}.`));
     if (typeof record?.error?.message === "string") console.log(pc.dim(`awal: ${safe(record.error.message).slice(0, 300)}`));
     console.log(pc.dim("If awal is not signed in, run: awal auth login you@example.com\n"));
     return false;
   }
-  if (!options402.some((accept) => accept.network === settlement.network)) {
+  const quoted = options402.find((accept) => accept.network === settlement.network);
+  if (!quoted) {
     console.log(pc.red(`\nawal settled on ${safe(settlement.network)}, which is not one of the mainnet options above, so this is not a first sale.\n`));
     return false;
   }
-  const candidate = settlement?.transaction ?? findTransaction(output);
-  const networks402 = settlement?.network ? [settlement.network] : options402.map((accept) => accept.network);
-  const transaction = candidate && networks402.some((id) => isTransactionFor(id, candidate))
-    ? candidate
-    : undefined;
+  const candidate = settlement.transaction ?? findTransaction(output);
+  const transaction = candidate && isTransactionFor(quoted.network, candidate) ? candidate : undefined;
   if (!transaction) {
     console.log(pc.red("\nThe seller reported a payment without a settlement transaction, so there is nothing to prove it."));
     console.log(pc.dim("A first sale counts once the payment settles on chain and the receipt names the transaction.\n"));
     return false;
   }
-  const link = (settlement?.network ? explorer(settlement.network, transaction) : undefined)
-    ?? options402.map((accept) => explorer(accept.network, transaction)).find(Boolean);
+  const chain = networkOf(quoted.network)?.name ?? quoted.network;
+  const link = explorer(quoted.network, transaction);
+  console.log(pc.dim(`Confirming the receipt on ${chain}…`));
+  const receipt = await confirmSale(quoted, transaction, options.fetcher);
+  if (!receipt.settled) {
+    console.log(pc.red(`\n${chain} does not confirm that transaction as this sale: ${safe(receipt.reason ?? "unknown")}.`));
+    console.log(pc.dim("The PAYMENT-RESPONSE header comes from the seller, so the chain decides whether a sale happened, not the header."));
+    console.log(pc.dim("If money did leave your wallet, the explorer is the place to look:"));
+    console.log(`${pc.dim("tx")}  ${link ?? safe(transaction)}\n`);
+    return false;
+  }
   const done = Number(record?.status);
-  console.log(pc.green(`\nFirst sale done${Number.isInteger(done) ? ` · HTTP ${done}` : ""}`));
+  console.log(pc.green(`\nFirst sale done on ${chain}${Number.isInteger(done) ? ` · HTTP ${done}` : ""}`));
+  console.log(`${pc.dim("settled")}  ${formatUsdc(receipt.amount ?? quoted.amount)} USDC from ${safe(receipt.payer ?? "the buyer")} to ${safe(receipt.payee ?? quoted.payTo)}`);
   console.log(`${pc.dim("tx")}  ${link ?? safe(transaction)}`);
   console.log(`${pc.dim("listing")}  ${await listingStatus(result.url, options.fetcher)}\n`);
   return true;
