@@ -72,6 +72,11 @@ function exists(command: string): boolean {
   return captured(command, ["--version"]).status === 0;
 }
 
+function acpReport(): { present: boolean; version: string | undefined } {
+  const result = captured("acp", ["--version"]);
+  return { present: result.status === 0, version: result.stdout.match(/\d+\.\d+\.\d+/)?.[0] };
+}
+
 function parseJson(value: string): unknown {
   return JSON.parse(value.trim());
 }
@@ -241,13 +246,19 @@ export async function runStart(options: StartOptions = {}): Promise<boolean> {
   }
 
   stage(3, "ACP");
-  const installed = captured("acp", ["--version"]);
-  const installedVersion = installed.status === 0 ? installed.stdout.match(/\d+\.\d+\.\d+/)?.[0] : undefined;
-  if (installed.status === 0 && installedVersion !== ACP_CLI_VERSION) {
-    action(`ACP CLI ${installedVersion ?? "unknown version"} installed; cult is tested with ${ACP_CLI_VERSION}`);
+  const installed = acpReport();
+  if (installed.present && installed.version !== ACP_CLI_VERSION) {
+    action(`ACP CLI ${installed.version ?? "unknown version"} installed; cult is tested with ${ACP_CLI_VERSION}`);
     if (!await confirm(`Install the Virtuals ACP CLI ${ACP_CLI_VERSION} now?`)) return paused();
     if (!interactive("npm", ["install", "-g", `@virtuals-protocol/acp-cli@${ACP_CLI_VERSION}`], 5 * 60_000)) {
       return fail("ACP CLI installation failed");
+    }
+    const upgraded = acpReport();
+    if (!upgraded.present || upgraded.version !== ACP_CLI_VERSION) {
+      return fail(
+        `ACP CLI still reports ${upgraded.version ?? "no version"} after installing ${ACP_CLI_VERSION}`,
+        "Another acp may come first in PATH. Check with: which -a acp"
+      );
     }
   }
   if (!exists("acp")) {

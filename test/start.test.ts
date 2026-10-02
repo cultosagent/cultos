@@ -214,6 +214,25 @@ describe("cult start", () => {
     expect(confirm).toHaveBeenCalledWith("Install the Virtuals ACP CLI 1.0.39 now?");
   });
 
+  test("refuses to continue when the install leaves the wrong ACP CLI in PATH", async () => {
+    installGit();
+    installGitHub();
+    installAcp();
+    renameSync(join(directory, "acp"), join(directory, "acp-real"));
+    executable("acp", [
+      'if [ "$1" = "--version" ]; then echo \'1.0.33\'; exit 0; fi',
+      `exec '${join(directory, "acp-real")}' "$@"`
+    ].join("\n"));
+    executable("npm", ["exit 0"].join("\n"));
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
+    const result = await start();
+
+    expect(result.ready).toBe(false);
+    expect(result.launch).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("still reports 1.0.33");
+  });
+
   test("installs the ACP CLI when approved", async () => {
     installGit();
     installGitHub();

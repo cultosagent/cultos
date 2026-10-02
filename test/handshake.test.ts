@@ -108,10 +108,11 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-function fakeAwal(output: string): string {
+function fakeAwal(output: string, address?: string): string {
   const log = join(directory, "awal.log");
   const path = join(directory, "awal");
-  writeFileSync(path, `#!/bin/sh\necho "$*" >> '${log}'\nif [ "$1" = "--version" ]; then echo 2.12.1; exit 0; fi\necho '${output}'\n`);
+  const reports = address ? `echo '${address}'; exit 0` : "exit 1";
+  writeFileSync(path, `#!/bin/sh\necho "$*" >> '${log}'\nif [ "$1" = "--version" ]; then echo 2.12.1; exit 0; fi\nif [ "$1" = "address" ]; then ${reports}; fi\necho '${output}'\n`);
   chmodSync(path, 0o755);
   process.env.PATH = `${directory}:${previousPath}`;
   return log;
@@ -200,6 +201,18 @@ describe("cult handshake", () => {
     expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quoting() })).toBe(true);
   });
 
+  it("matches the payer to the wallet awal reports as its own", async () => {
+    const receipt = Buffer.from(JSON.stringify({ success: true, transaction: tx, network: "eip155:8453" })).toString("base64");
+    const awal = JSON.stringify({ status: 200, paymentMade: true, headers: { "PAYMENT-RESPONSE": receipt } });
+    const stranger = `0x${"ab".repeat(20)}`;
+
+    fakeAwal(awal, JSON.stringify({ evm: machinePayout, solana: solanaPayout }));
+    expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quoting() })).toBe(true);
+
+    fakeAwal(awal, JSON.stringify({ evm: stranger, solana: solanaPayout }));
+    expect(await runHandshake(endpoint, { confirm: async () => true, fetcher: quoting() })).toBe(false);
+  });
+
   it("confirms a Solana first sale from the token balances it moved", async () => {
     const receipt = Buffer.from(JSON.stringify({ success: true, transaction: signature, network: solanaMainnet })).toString("base64");
     const awal = JSON.stringify({ status: 200, paymentMade: true, headers: { "PAYMENT-RESPONSE": receipt } });
@@ -221,6 +234,12 @@ describe("cult handshake", () => {
 
     fakeAwal(awal);
     expect(await runHandshake(endpoint, { ...lookup, fetcher: solanaQuoting(confirmed, moved) })).toBe(true);
+
+    fakeAwal(awal, JSON.stringify({ evm: machinePayout, solana: solanaBuyer }));
+    expect(await runHandshake(endpoint, { ...lookup, fetcher: solanaQuoting(confirmed, moved) })).toBe(true);
+
+    fakeAwal(awal, JSON.stringify({ evm: machinePayout, solana: solanaPayout }));
+    expect(await runHandshake(endpoint, { ...lookup, fetcher: solanaQuoting(confirmed, moved) })).toBe(false);
 
     for (const [statuses, transaction] of [
       [confirmed, short],

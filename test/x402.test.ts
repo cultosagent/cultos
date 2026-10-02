@@ -79,7 +79,7 @@ describe("cult check", () => {
   });
 
   it("fails an empty or null Bazaar field", async () => {
-    for (const bazaar of [null, {}, "yes", [], { info: null }, { info: {} }, { info: { schema: {} } }, { info: { output: "yes" } }, { info: { input: true, output: 1 } }, { info: { input: [] } }, [{ info: { input: { type: "object" } } }]]) {
+    for (const bazaar of [null, {}, "yes", [], { info: null }, { info: {} }, { info: { schema: {} } }, { info: { output: "yes" } }, { info: { input: true, output: 1 } }, { info: { input: [] } }, { info: { output: {} } }, { info: { input: {}, output: {} } }, [{ info: { input: { type: "object" } } }]]) {
       const fetcher = (async () => new Response(null, { status: 402, headers: { "PAYMENT-REQUIRED": header({ ...good, extensions: { bazaar } }) } })) as typeof fetch;
       expect(passed(await checkEndpoint("https://api.example.com/data", { fetcher }))).toBe(false);
     }

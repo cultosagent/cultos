@@ -258,12 +258,16 @@ function isObject(value: unknown): boolean {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function describesShape(value: unknown): boolean {
+  return isObject(value) && Object.keys(value as object).length > 0;
+}
+
 export function hasBazaarMetadata(value: unknown): boolean {
   if (!isObject(value)) return false;
   const info = (value as { info?: unknown }).info;
   if (!isObject(info)) return false;
   const described = info as { input?: unknown; output?: unknown };
-  return isObject(described.input) || isObject(described.output);
+  return describesShape(described.input) || describesShape(described.output);
 }
 
 export function passed(result: CheckResult): boolean {

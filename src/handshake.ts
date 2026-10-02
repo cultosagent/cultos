@@ -5,7 +5,7 @@ import pc from "picocolors";
 import { safe } from "./display.js";
 import { commandExists } from "./github.js";
 import { validBroker, X402_MQTT_VERSION } from "./build.js";
-import { checkEndpoint, decodeBase64, formatUsdc, isEvmAddress, isLocal, networkOf, passed, solanaRpcFor, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
+import { checkEndpoint, decodeBase64, formatUsdc, isEvmAddress, isLocal, isSolanaAddress, networkOf, passed, solanaRpcFor, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
 
 export const AWAL_VERSION = "2.12.1";
 export const DEFAULT_CAP = "0.01";
@@ -153,6 +153,28 @@ export interface SettlementReceipt {
 export interface SaleTerms {
   units: bigint;
   payTo: string;
+  payer?: string | undefined;
+}
+
+export interface AwalAddresses {
+  evm?: string | undefined;
+  solana?: string | undefined;
+}
+
+export function awalAddresses(): AwalAddresses {
+  const asked = spawnSync("awal", ["address", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+  if (asked.status !== 0) return {};
+  let reported: unknown;
+  try {
+    reported = JSON.parse(asked.stdout.trim());
+  } catch {
+    return {};
+  }
+  const record = reported && typeof reported === "object" ? reported as Record<string, unknown> : {};
+  const named = [record.evm, record.solana, record.address, reported].filter((value): value is string => typeof value === "string");
+  const evm = named.find(isEvmAddress);
+  const solana = named.find(isSolanaAddress);
+  return { ...(evm ? { evm } : {}), ...(solana ? { solana } : {}) };
 }
 
 export const MACHINE_CONFIG = "x402-mqtt.json";
@@ -203,9 +225,11 @@ export async function confirmOnBase(
 
     if (transfers.length === 0) return { settled: false, reason: "no USDC transfer in that transaction" };
     const matched = transfers.find((transfer) =>
-      transfer.value === sale.units && transfer.to.toLowerCase() === sale.payTo.toLowerCase());
+      transfer.value === sale.units
+      && transfer.to.toLowerCase() === sale.payTo.toLowerCase()
+      && (!sale.payer || transfer.from.toLowerCase() === sale.payer.toLowerCase()));
     if (!matched) {
-      return { settled: false, reason: `no USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo} in that transaction` };
+      return { settled: false, reason: unmatched(sale) };
     }
     return {
       settled: true,
@@ -234,6 +258,13 @@ function tokenMoves(before: unknown, after: unknown, mint: string): TokenMove[] 
   return held(after).map((entry) => ({ owner: entry.owner, delta: entry.amount - (opening.get(entry.index) ?? 0n) }));
 }
 
+function unmatched(sale: SaleTerms): string {
+  const payment = `USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo}`;
+  return sale.payer
+    ? `no ${payment} from ${sale.payer} in that transaction`
+    : `no ${payment} in that transaction`;
+}
+
 export interface SolanaSale extends SaleTerms {
   mint: string;
 }
@@ -260,10 +291,10 @@ export async function confirmOnSolana(
       { meta?: { preTokenBalances?: unknown; postTokenBalances?: unknown } } | null | undefined;
     if (!confirmed?.meta) continue;
     const moves = tokenMoves(confirmed.meta.preTokenBalances, confirmed.meta.postTokenBalances, sale.mint);
-    if (!moves.some((move) => move.owner === sale.payTo && move.delta === sale.units)) {
-      return { settled: false, reason: `no USDC transfer of ${formatUsdc(sale.units.toString())} to ${sale.payTo} in that transaction` };
-    }
     const payer = moves.find((move) => move.delta === -sale.units);
+    const paid = moves.some((move) => move.owner === sale.payTo && move.delta === sale.units)
+      && (!sale.payer || payer?.owner === sale.payer);
+    if (!paid) return { settled: false, reason: unmatched(sale) };
     return {
       settled: true,
       payee: sale.payTo,
@@ -274,10 +305,10 @@ export async function confirmOnSolana(
   return { settled: false, reason: `no confirmed transaction on Solana for ${signature}` };
 }
 
-export async function confirmSale(accept: Accept, transaction: string, fetcher: typeof fetch = fetch): Promise<SettlementReceipt> {
+export async function confirmSale(accept: Accept, transaction: string, payer: string | undefined, fetcher: typeof fetch = fetch): Promise<SettlementReceipt> {
   const network = networkOf(accept.network);
   if (!network) return { settled: false, reason: "cult does not settle on that network" };
-  const sale: SaleTerms = { units: BigInt(accept.amount), payTo: accept.payTo };
+  const sale: SaleTerms = { units: BigInt(accept.amount), payTo: accept.payTo, ...(payer ? { payer } : {}) };
   if (network.family === "solana") return confirmOnSolana(transaction, { ...sale, mint: network.usdc }, network.id, fetcher);
   if (network.id !== "eip155:8453") return { settled: false, reason: `cult confirms EVM sales on Base only, not ${network.name}` };
   return confirmOnBase(transaction, sale, fetcher);
@@ -336,6 +367,11 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
     console.log(pc.dim(`Then check the listing with: cult handshake ${safe(quote(result.url))} --check\n`));
     return false;
   }
+  const buyer = awalAddresses();
+  const wallets = [buyer.evm, buyer.solana].filter((value): value is string => Boolean(value));
+  console.log(wallets.length > 0
+    ? `${pc.dim("pays from")}  ${wallets.map((wallet) => safe(wallet)).join("  ")}\n`
+    : pc.dim("awal did not report its own address, so the receipt's payer cannot be checked.\n"));
   if (!options.yes && !await options.confirm("Make this real payment now?")) {
     console.log(pc.dim("No payment made.\n"));
     return false;
@@ -374,10 +410,12 @@ async function handshakeHttp(target: string, options: HandshakeOptions): Promise
   const chain = networkOf(quoted.network)?.name ?? quoted.network;
   const link = explorer(quoted.network, transaction);
   console.log(pc.dim(`Confirming the receipt on ${chain}…`));
-  const receipt = await confirmSale(quoted, transaction, options.fetcher);
+  const payer = networkOf(quoted.network)?.family === "solana" ? buyer.solana : buyer.evm;
+  const receipt = await confirmSale(quoted, transaction, payer, options.fetcher);
   if (!receipt.settled) {
     console.log(pc.red(`\n${chain} does not confirm that transaction as this sale: ${safe(receipt.reason ?? "unknown")}.`));
     console.log(pc.dim("The PAYMENT-RESPONSE header comes from the seller, so the chain decides whether a sale happened, not the header."));
+    if (payer) console.log(pc.dim(`The payer had to be ${safe(payer)}, which is what awal reported as its own address.`));
     console.log(pc.dim("If money did leave your wallet, the explorer is the place to look:"));
     console.log(`${pc.dim("tx")}  ${link ?? safe(transaction)}\n`);
     return false;
