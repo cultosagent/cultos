@@ -5,7 +5,7 @@ import { isEvmAddress, isSolanaAddress } from "./x402.js";
 export const X402_VERSION = "2.28.0";
 export const COINBASE_X402_VERSION = "2.1.0";
 export const EXPRESS_VERSION = "5.2.1";
-export const X402_MQTT_VERSION = "0.1.4";
+export const X402_MQTT_VERSION = "0.2.0";
 export const MQTT_VERSION = "5.16.0";
 export const TESTNET_FACILITATOR = "https://x402.org/facilitator";
 
@@ -28,6 +28,8 @@ export interface MachineAnswers {
   price: string;
   mainnet: boolean;
   broker?: string | undefined;
+  network?: Rail | undefined;
+  solanaPayout?: string | undefined;
 }
 
 export type Files = Record<string, string>;
@@ -213,10 +215,21 @@ setInterval(() => {
 `;
 
 export function machineFiles(answers: MachineAnswers): Files {
-  if (!validEvmAddress(answers.payout)) throw new Error("payout must be a 0x address on Base");
+  const rail = answers.network ?? "base";
+  if (rail !== "base" && rail !== "solana") throw new Error("--network must be base or solana");
+  if (rail === "solana" ? !validSolanaAddress(answers.payout) : !validEvmAddress(answers.payout)) {
+    throw new Error(rail === "solana" ? "payout must be a Solana address" : "payout must be a 0x address on Base");
+  }
+  if (answers.solanaPayout !== undefined && (rail !== "base" || !validSolanaAddress(answers.solanaPayout))) {
+    throw new Error("--solana-payout needs a Solana address alongside a Base payout");
+  }
+  if (!answers.mainnet && (rail === "solana" || answers.solanaPayout !== undefined)) {
+    throw new Error("Solana machines require mainnet");
+  }
   if (!validPrice(answers.price)) throw new Error("price must be a USD amount like 0.001");
-  const network = answers.mainnet ? "eip155:8453" : "eip155:84532";
+  const network = rail === "solana" ? "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" : answers.mainnet ? "eip155:8453" : "eip155:84532";
   const facilitator = answers.mainnet ? "coinbase" : TESTNET_FACILITATOR;
+  const solana = answers.solanaPayout ? { solanaPayout: answers.solanaPayout } : {};
   const cli = "node --env-file=.env node_modules/@cultos/x402-mqtt/dist/cli.js";
 
   if (answers.device === "mac") {
@@ -225,10 +238,11 @@ export function machineFiles(answers: MachineAnswers): Files {
         name: answers.name,
         private: true,
         type: "module",
+        engines: { node: ">=20.12" },
         scripts: { start: `${cli} sell` },
         dependencies: { "@cultos/x402-mqtt": X402_MQTT_VERSION }
       }),
-      "x402-mqtt.json": json({ payout: answers.payout, network, facilitator, source: "mac", price: answers.price, ledger: "x402-mqtt-ledger.jsonl", pagePort: 4020 }),
+      "x402-mqtt.json": json({ payout: answers.payout, network, ...solana, facilitator, source: "mac", price: answers.price, ledger: "x402-mqtt-ledger.jsonl", pagePort: 4020 }),
       ".env": envFile([["CDP_API_KEY_ID", ""], ["CDP_API_KEY_SECRET", ""]]),
       ".gitignore": "node_modules\n.env\nx402-mqtt-ledger.jsonl\n",
       "README.md": `# ${answers.name}
@@ -242,7 +256,8 @@ npm start
 
 - It runs a built-in broker on \`mqtt://127.0.0.1:1883\` and a sales page on http://127.0.0.1:4020.
 - ${answers.mainnet ? "Mainnet: add CDP_API_KEY_ID and CDP_API_KEY_SECRET to .env (https://portal.cdp.coinbase.com)." : "Testnet with the free x402.org facilitator. For mainnet, set network to eip155:8453 and facilitator to coinbase in x402-mqtt.json, and add the CDP keys to .env."}
-- Sales go to ${answers.payout}. Buyers pay $${answers.price} per reading.
+- ${answers.solanaPayout ? `Base payouts go to ${answers.payout}; Solana payouts go to ${answers.solanaPayout}.` : `Sales go to ${answers.payout}.`} Buyers pay $${answers.price} per reading.
+${rail === "solana" || answers.solanaPayout ? "- Solana payouts need an existing USDC account.\n" : ""}
 - First sale, on mainnet, from a small-balance buyer wallet: run \`read -rs X402_MQTT_BUYER_KEY && export X402_MQTT_BUYER_KEY\` so the key stays out of your shell history, then \`cult handshake mac/cpu/load --broker mqtt://127.0.0.1:1883\`.
 `
     };
@@ -260,10 +275,11 @@ npm start
       name: answers.name,
       private: true,
       type: "module",
+      engines: { node: ">=20.12" },
       scripts: { start: `${cli} sell`, publish: "node --env-file=.env publisher.mjs" },
       dependencies: { "@cultos/x402-mqtt": X402_MQTT_VERSION, mqtt: MQTT_VERSION }
     }),
-    "x402-mqtt.json": json({ broker: answers.broker, brokerUsername: "x402-bridge", brokerPassword: "set-your-bridge-password", payout: answers.payout, network, facilitator, price: answers.price, offers, ledger: "x402-mqtt-ledger.jsonl", pagePort: false }),
+    "x402-mqtt.json": json({ broker: answers.broker, brokerUsername: "x402-bridge", brokerPassword: "set-your-bridge-password", payout: answers.payout, network, ...solana, facilitator, price: answers.price, offers, ledger: "x402-mqtt-ledger.jsonl", pagePort: false }),
     "publisher.mjs": linuxPublisher,
     ".env": envFile([["BROKER_URL", answers.broker], ["MQTT_USERNAME", "server"], ["MQTT_PASSWORD", ""], ["DEVICE", "server"], ["CDP_API_KEY_ID", ""], ["CDP_API_KEY_SECRET", ""]]),
     ".gitignore": "node_modules\n.env\nx402-mqtt.json\nx402-mqtt-ledger.jsonl\n",
@@ -281,7 +297,8 @@ npm start         # sells them
 
 - Set the bridge password in \`x402-mqtt.json\` and the publisher password in \`.env\`. Both files stay out of Git.
 - ${answers.mainnet ? "Mainnet: add CDP_API_KEY_ID and CDP_API_KEY_SECRET to .env." : "Testnet with the free x402.org facilitator. For mainnet, set network to eip155:8453 and facilitator to coinbase in x402-mqtt.json, and add the CDP keys to .env."}
-- Sales go to ${answers.payout}. Buyers pay $${answers.price} per reading.
+- ${answers.solanaPayout ? `Base payouts go to ${answers.payout}; Solana payouts go to ${answers.solanaPayout}.` : `Sales go to ${answers.payout}.`} Buyers pay $${answers.price} per reading.
+${rail === "solana" || answers.solanaPayout ? "- Solana payouts need an existing USDC account.\n" : ""}
 `
   };
 }

@@ -87,7 +87,7 @@ describe("cult build machine", () => {
     expect(config.source).toBe("mac");
     expect(config.network).toBe("eip155:84532");
     expect(config.facilitator).toBe("https://x402.org/facilitator");
-    expect(files["package.json"]).toContain("\"@cultos/x402-mqtt\": \"0.1.4\"");
+    expect(files["package.json"]).toContain("\"@cultos/x402-mqtt\": \"0.2.0\"");
   });
 
   it("writes a Linux publisher and keeps broker passwords out of Git", () => {
@@ -109,6 +109,51 @@ describe("cult build machine", () => {
 
   it("needs a broker for Linux", async () => {
     await expect(runBuildMachine(join(directory, "box"), { device: "linux", payout: evm })).rejects.toThrow("broker");
+  });
+
+  it.each(["mac", "linux"] as const)("writes %s sellers for Solana and both networks", (device) => {
+    for (const both of [false, true]) {
+      const files = machineFiles({ name: "box", device, payout: both ? evm : solana, network: both ? "base" : "solana", solanaPayout: both ? solana : undefined, price: "0.001", mainnet: true, broker: "mqtts://broker.example.com:8883" });
+      const config = JSON.parse(files["x402-mqtt.json"]!);
+      expect(config.network).toBe(both ? "eip155:8453" : "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
+      expect(config.payout).toBe(both ? evm : solana);
+      expect(config.solanaPayout).toBe(both ? solana : undefined);
+      expect(config.facilitator).toBe("coinbase");
+      expect(JSON.parse(files["package.json"]!).dependencies["@cultos/x402-mqtt"]).toBe("0.2.0");
+    }
+  });
+
+  it("rejects unsupported Solana configurations before writing", async () => {
+    for (const answers of [
+      { network: "solana" as const, payout: evm, mainnet: true },
+      { network: "solana" as const, payout: solana, mainnet: false },
+      { payout: evm, solanaPayout: solana, mainnet: false },
+      { payout: evm, solanaPayout: evm, mainnet: true }
+    ]) {
+      expect(() => machineFiles({ name: "box", device: "mac", price: "0.001", ...answers })).toThrow();
+    }
+    await expect(runBuildMachine(join(directory, "bad"), { device: "mac", network: "devnet", payout: solana })).rejects.toThrow("--network");
+  });
+
+  it("builds Solana and dual-network projects from flags on mainnet", async () => {
+    for (const both of [false, true]) {
+      const folder = join(directory, both ? "both" : "solana");
+      await runBuildMachine(folder, { device: "mac", network: both ? "base" : "solana", payout: both ? evm : solana, ...(both ? { solanaPayout: solana } : {}) });
+      const config = JSON.parse(readFileSync(join(folder, "x402-mqtt.json"), "utf8"));
+      expect(config.facilitator).toBe("coinbase");
+      expect(config.network).toBe(both ? "eip155:8453" : "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
+    }
+  });
+
+  it("asks for both payout addresses when both machine networks are selected", async () => {
+    const answers = ["box", evm, solana, "0.001"];
+    const asker = { ask: vi.fn(async () => answers.shift()!), confirm: vi.fn(async () => false), choose: vi.fn(async () => 2) };
+    const folder = join(directory, "asked");
+    await runBuildMachine(folder, { device: "mac" }, asker);
+    const config = JSON.parse(readFileSync(join(folder, "x402-mqtt.json"), "utf8"));
+    expect(config.payout).toBe(evm);
+    expect(config.solanaPayout).toBe(solana);
+    expect(config.facilitator).toBe("coinbase");
   });
 });
 

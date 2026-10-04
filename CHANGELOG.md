@@ -6,6 +6,8 @@ Cult OS now builds for the machine economy. `cult start` asks what you want to d
 
 `cult watch` no longer passes a chain flag the ACP CLI rejects, so watching a live job works again. `cult start` installs the pinned ACP CLI 1.0.39, and `cult doctor` reports the ACP CLI version and awal.
 
+Machine projects and first sales now pin x402-mqtt 0.2.0. Mac and Linux sellers can accept Base, Solana or both; machine handshakes verify the receipt on the selected network. Solana uses mainnet. Base keeps its existing default configuration.
+
 ## 0.5.1
 
 Cult OS now treats remote terminal text, persisted job data, repository references, and subprocess arguments as explicit trust boundaries. The CLI rejects malformed delivery and state records, prevents terminal control-sequence injection, hardens GitHub and GitLawb argument handling, requires secure GitLawb transport outside loopback development, and remains responsive under sustained terminal output. Release publication now runs typecheck and tests before packing.

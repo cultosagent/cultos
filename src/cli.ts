@@ -227,12 +227,14 @@ build
   .argument("[folder]", "new, empty folder for the project")
   .option("--device <device>", "mac or linux")
   .option("--name <name>", "project name")
-  .option("--payout <address>", "Base payout address")
+  .option("--payout <address>", "payout address on the selected machine network")
+  .option("--network <network>", "machine payments on base or solana")
+  .option("--solana-payout <address>", "also accept Solana alongside Base")
   .option("--price <usd>", "price per reading in USD")
   .option("--broker <url>", "broker URL for a Linux server")
   .option("--mainnet", "start on mainnet instead of testnet")
   .description("Build a machine that sells its data over MQTT with x402-mqtt")
-  .action(async (folder: string | undefined, options: { device?: string; name?: string; payout?: string; price?: string; broker?: string; mainnet?: boolean }) => {
+  .action(async (folder: string | undefined, options: { device?: string; name?: string; payout?: string; price?: string; broker?: string; mainnet?: boolean; network?: string; solanaPayout?: string }) => {
     await runBuildMachine(folder, options, interactiveTerminal() ? terminal : undefined);
   });
 
@@ -265,11 +267,12 @@ program
   .option("-d, --data <json>", "JSON request body")
   .option("--max <usd>", "spending cap in USD", "0.01")
   .option("--broker <url>", "MQTT broker for a machine topic")
+  .option("--network <network>", "machine buyer network: base or solana; defaults to the project network")
   .option("--pay-to <address>", "machine payout address the receipt must pay; defaults to payout in x402-mqtt.json")
   .option("--check", "only show whether it is listed")
   .option("-y, --yes", "pay without asking")
   .description("Prove a seller with one real, capped first sale")
-  .action(async (target: string, options: { method?: string; data?: string; max?: string; broker?: string; payTo?: string; check?: boolean; yes?: boolean }) => {
+  .action(async (target: string, options: { method?: string; data?: string; max?: string; broker?: string; payTo?: string; check?: boolean; yes?: boolean; network?: string }) => {
     const ok = await runHandshake(target, {
       ...options,
       checkOnly: options.check,

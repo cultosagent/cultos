@@ -379,6 +379,110 @@ describe("cult handshake", () => {
     expect(confirmed.payer).toBe(`0x${"cd".repeat(20)}`);
   });
 
+  it("pays a Solana machine with the published buyer and confirms the selected rail", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    process.env.X402_MQTT_BUYER_KEY = "1".repeat(64);
+    const log = join(directory, "npx.log");
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho "$*" >> '${log}'\necho 'paid $0.001 · 1.9 load · tx ${signature}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    process.env.PATH = `${directory}:${previousPath}`;
+    const balance = (owner: string, index: number, amount: string, mint = solanaMint) => ({ accountIndex: index, mint, owner, uiTokenAmount: { amount } });
+    const moved = { meta: { preTokenBalances: [balance(solanaPayout, 1, "0"), balance(solanaBuyer, 2, "5000")], postTokenBalances: [balance(solanaPayout, 1, "1000"), balance(solanaBuyer, 2, "4000")] } };
+    const confirmed = { value: [{ err: null, confirmationStatus: "finalized" }] };
+    const options = { confirm: async () => true, yes: true, network: "solana", payTo: solanaPayout, max: "0.001" };
+    try {
+      expect(await runHandshake("mac/cpu/load", { ...options, fetcher: solanaQuoting(confirmed, moved) })).toBe(true);
+      expect(readFileSync(log, "utf8")).toContain("@cultos/x402-mqtt@0.2.0 buy mac/cpu/load --network solana");
+      expect(readFileSync(log, "utf8")).toContain("--max 0.001");
+      for (const transaction of [
+        { meta: { preTokenBalances: moved.meta.preTokenBalances, postTokenBalances: [balance(solanaPayout, 1, "999")] } },
+        { meta: { preTokenBalances: moved.meta.preTokenBalances, postTokenBalances: [balance(solanaBuyer, 1, "1000")] } },
+        { meta: { preTokenBalances: [], postTokenBalances: [balance(solanaPayout, 1, "1000", "wrong-mint")] } }
+      ]) {
+        expect(await runHandshake("mac/cpu/load", { ...options, fetcher: solanaQuoting(confirmed, transaction) })).toBe(false);
+      }
+      expect(await runHandshake("mac/cpu/load", { ...options, fetcher: solanaQuoting({ value: [{ err: "failed", confirmationStatus: "finalized" }] }, moved) })).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("refuses wrong machine networks and payouts before invoking the buyer", async () => {
+    const log = join(directory, "npx.log");
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho "$*" >> '${log}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    process.env.PATH = `${directory}:${previousPath}`;
+    const working = process.cwd();
+    process.chdir(directory);
+    try {
+      for (const options of [{ network: "devnet" }, { network: "solana", payTo: machinePayout }, { network: "base", payTo: solanaPayout }]) {
+        await expect(runHandshake("mac/cpu/load", { confirm: async () => true, yes: true, ...options })).rejects.toThrow();
+      }
+      for (const network of ["eip155:84532", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "unknown"]) {
+        writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ network, payout: machinePayout }));
+        await expect(runHandshake("mac/cpu/load", { confirm: async () => true, yes: true })).rejects.toThrow("mainnet");
+      }
+      expect(existsSync(log)).toBe(false);
+    } finally {
+      process.chdir(working);
+    }
+  });
+
+  it("selects the payout from Solana-only and dual-network machine projects", () => {
+    writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ network: solanaMainnet, payout: solanaPayout }));
+    expect(configuredPayout(directory, "solana")).toBe(solanaPayout);
+    expect(configuredPayout(directory, "base")).toBeUndefined();
+    writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ network: "eip155:8453", payout: machinePayout, solanaPayout }));
+    expect(salePayout(undefined, directory, "solana")).toBe(solanaPayout);
+    expect(salePayout(undefined, directory, "base")).toBe(machinePayout);
+  });
+
+  it("uses the project network by default and selects a dual-network Solana offer", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    const working = process.cwd();
+    process.env.X402_MQTT_BUYER_KEY = "1".repeat(64);
+    const log = join(directory, "npx.log");
+    writeFileSync(join(directory, "npx"), `#!/bin/sh\necho "$*" >> '${log}'\necho 'paid $0.001 · reading · tx ${signature}'\n`);
+    chmodSync(join(directory, "npx"), 0o755);
+    process.env.PATH = `${directory}:${previousPath}`;
+    process.chdir(directory);
+    const balance = (amount: string) => ({ accountIndex: 1, mint: solanaMint, owner: solanaPayout, uiTokenAmount: { amount } });
+    const fetcher = solanaQuoting({ value: [{ err: null, confirmationStatus: "finalized" }] }, { meta: { preTokenBalances: [balance("0")], postTokenBalances: [balance("1000")] } });
+    try {
+      writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ network: solanaMainnet, payout: solanaPayout }));
+      expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true, fetcher })).toBe(true);
+      writeFileSync(join(directory, MACHINE_CONFIG), JSON.stringify({ network: "eip155:8453", payout: machinePayout, solanaPayout }));
+      expect(await runHandshake("mac/cpu/load", { network: "solana", confirm: async () => true, yes: true, fetcher })).toBe(true);
+      expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+      expect(readFileSync(log, "utf8").split("\n").filter(Boolean).every((line) => line.includes("--network solana"))).toBe(true);
+    } finally {
+      process.chdir(working);
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("refuses a receipt from the wrong rail or above the cap", async () => {
+    const previous = process.env.X402_MQTT_BUYER_KEY;
+    process.env.X402_MQTT_BUYER_KEY = "1".repeat(64);
+    process.env.PATH = `${directory}:${previousPath}`;
+    writeFileSync(join(directory, "npx"), "#!/bin/sh\n");
+    chmodSync(join(directory, "npx"), 0o755);
+    const fetcher = vi.fn(async () => { throw new Error("must not query a mismatched receipt"); }) as unknown as typeof fetch;
+    try {
+      for (const output of [`paid $0.001 · reading · tx ${tx}`, `paid $0.002 · reading · tx ${signature}`]) {
+        writeFileSync(join(directory, "npx"), `#!/bin/sh\necho '${output}'\n`);
+        expect(await runHandshake("mac/cpu/load", { confirm: async () => true, yes: true, network: "solana", payTo: solanaPayout, max: "0.001", fetcher })).toBe(false);
+      }
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.X402_MQTT_BUYER_KEY; else process.env.X402_MQTT_BUYER_KEY = previous;
+    }
+  });
+
+  it("rejects the machine network flag on an HTTP handshake", async () => {
+    await expect(runHandshake(endpoint, { network: "solana", confirm: async () => true })).rejects.toThrow("machine");
+  });
+
   it("needs the machine payout to prove the sale, and spends nothing while it has none", async () => {
     const previous = process.env.X402_MQTT_BUYER_KEY;
     const working = process.cwd();

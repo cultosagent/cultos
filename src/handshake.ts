@@ -4,7 +4,7 @@ import { join } from "node:path";
 import pc from "picocolors";
 import { safe } from "./display.js";
 import { commandExists } from "./github.js";
-import { validBroker, X402_MQTT_VERSION } from "./build.js";
+import { validBroker, X402_MQTT_VERSION, type Rail } from "./build.js";
 import { checkEndpoint, decodeBase64, formatUsdc, isEvmAddress, isLocal, isSolanaAddress, networkOf, passed, solanaRpcFor, type Accept, type CheckResult, type Finding, type TokenAccountLookup } from "./x402.js";
 
 export const AWAL_VERSION = "2.12.1";
@@ -21,6 +21,7 @@ export interface HandshakeOptions {
   confirm: (question: string) => Promise<boolean>;
   fetcher?: typeof fetch | undefined;
   tokenAccount?: TokenAccountLookup | undefined;
+  network?: string | undefined;
 }
 
 export function capUnits(max: string): bigint {
@@ -179,19 +180,37 @@ export function awalAddresses(): AwalAddresses {
 
 export const MACHINE_CONFIG = "x402-mqtt.json";
 
-export function configuredPayout(folder: string = process.cwd()): string | undefined {
-  let payout: unknown;
+function machineConfig(folder: string = process.cwd()): { network?: unknown; payout?: unknown; solanaPayout?: unknown } {
   try {
-    payout = (JSON.parse(readFileSync(join(folder, MACHINE_CONFIG), "utf8")) as { payout?: unknown }).payout;
+    const config: unknown = JSON.parse(readFileSync(join(folder, MACHINE_CONFIG), "utf8"));
+    return config && typeof config === "object" && !Array.isArray(config) ? config : {};
   } catch {
-    return undefined;
+    return {};
   }
-  return typeof payout === "string" && isEvmAddress(payout) ? payout : undefined;
 }
 
-export function salePayout(flag: string | undefined, folder?: string): string | undefined {
-  if (flag === undefined) return configuredPayout(folder);
-  if (!isEvmAddress(flag)) throw new Error("--pay-to must be a 0x address on Base that is not the zero address");
+function machineNetwork(flag?: string) {
+  const selected = flag ?? machineConfig().network ?? "base";
+  if (flag !== undefined && flag !== "base" && flag !== "solana") throw new Error("--network must be base or solana");
+  const id = selected === "base" ? "eip155:8453" : selected === "solana" ? "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" : selected;
+  const network = typeof id === "string" ? networkOf(id) : undefined;
+  if (!network || network.testnet) throw new Error("a machine first sale requires Base or Solana mainnet");
+  return network;
+}
+
+export function configuredPayout(folder: string = process.cwd(), rail: Rail = "base"): string | undefined {
+  const config = machineConfig(folder);
+  const primarySolana = config.network === "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+  if (rail === "base" && primarySolana) return undefined;
+  const payout = rail === "solana" && !primarySolana ? config.solanaPayout : config.payout;
+  return typeof payout === "string" && (rail === "solana" ? isSolanaAddress(payout) : isEvmAddress(payout)) ? payout : undefined;
+}
+
+export function salePayout(flag: string | undefined, folder?: string, rail: Rail = "base"): string | undefined {
+  if (flag === undefined) return configuredPayout(folder, rail);
+  if (rail === "solana" ? !isSolanaAddress(flag) : !isEvmAddress(flag)) {
+    throw new Error(rail === "solana" ? "--pay-to must be a Solana address" : "--pay-to must be a 0x address on Base that is not the zero address");
+  }
   return flag;
 }
 
@@ -440,9 +459,11 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   if (!validBroker(broker)) {
     throw new Error("a remote broker must use mqtts:// or wss://; plain mqtt:// or ws:// only on this machine");
   }
-  const payTo = salePayout(options.payTo);
+  const network = machineNetwork(options.network);
+  const rail: Rail = network.family === "solana" ? "solana" : "base";
+  const payTo = salePayout(options.payTo, undefined, rail);
   console.log(pc.bold("\nCULT OS // HANDSHAKE\n"));
-  console.log(`${pc.dim("topic")}   ${topic}\n${pc.dim("broker")}  ${broker}\n${pc.dim("cap")}     ${max} USDC`);
+  console.log(`${pc.dim("topic")}   ${safe(topic)}\n${pc.dim("broker")}  ${safe(broker)}\n${pc.dim("network")} ${network.name}\n${pc.dim("cap")}     ${max} USDC`);
   if (!payTo) {
     console.log(pc.yellow("\nA first sale has to prove where the money landed, so it needs the machine's payout address."));
     console.log(pc.dim(`Run this inside the project cult build machine made, which records payout in ${MACHINE_CONFIG}, or pass --pay-to <address>.\n`));
@@ -452,44 +473,49 @@ async function handshakeMqtt(topic: string, options: HandshakeOptions): Promise<
   if (!process.env.X402_MQTT_BUYER_KEY) {
     console.log(pc.yellow("Machines are paid with your own small-balance buyer wallet. Load its key without typing it into your shell history, then run again:"));
     console.log("  read -rs X402_MQTT_BUYER_KEY && export X402_MQTT_BUYER_KEY");
-    console.log(pc.dim("cult never stores it; x402-mqtt signs locally and only for USDC on Base.\n"));
+    console.log(pc.dim(`cult never stores it; x402-mqtt signs locally for USDC on ${network.name}.\n`));
     return false;
   }
   if (!options.yes && !await options.confirm("Make this real payment now?")) {
     console.log(pc.dim("No payment made.\n"));
     return false;
   }
-  const bought = spawnSync("npx", ["--yes", `@cultos/x402-mqtt@${X402_MQTT_VERSION}`, "buy", topic, "--broker", broker, "--max", max], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3 * 60_000 });
+  const bought = spawnSync("npx", ["--yes", `@cultos/x402-mqtt@${X402_MQTT_VERSION}`, "buy", topic, "--network", rail, "--broker", broker, "--max", max], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3 * 60_000 });
   const output = `${bought.stdout ?? ""}\n${bought.stderr ?? ""}`;
-  const transaction = output.match(/tx (0x[0-9a-fA-F]{64})/)?.[1];
-  if (bought.status !== 0 || !transaction) {
+  const paid = (bought.stdout ?? "").match(/^paid \$([0-9]+(?:\.[0-9]{1,6})?) · (.*) · tx (\S+)$/m);
+  const transaction = paid?.[3];
+  if (bought.status !== 0 || !transaction || !isTransactionFor(network.id, transaction)) {
     const reason = output.split("\n").map((line) => safe(line).trim()).filter(Boolean).pop();
-    console.log(pc.red("\nNo payment went through."));
+    console.log(pc.red("\nThe machine purchase was not confirmed."));
     if (reason) console.log(pc.dim(`x402-mqtt: ${reason.slice(0, 300)}`));
+    console.log(pc.dim("If the purchase is pending, rerun the same command to resume it.\n"));
     return false;
   }
-  const reported = output.match(/paid \$([0-9]+(?:\.[0-9]{1,6})?)/)?.[1];
-  if (!reported) {
+  const reported = paid?.[1];
+  if (!reported || capUnits(reported) <= 0n || capUnits(reported) > capUnits(max)) {
     console.log(pc.red("\nx402-mqtt did not report what it paid, so the receipt cannot be matched to the sale.\n"));
     return false;
   }
-  console.log(pc.dim("Confirming the receipt on Base…"));
-  const receipt = await confirmOnBase(transaction, { units: capUnits(reported), payTo }, options.fetcher);
+  console.log(pc.dim(`Confirming the receipt on ${network.name}…`));
+  const sale = { units: capUnits(reported), payTo };
+  const receipt = rail === "solana"
+    ? await confirmOnSolana(transaction, { ...sale, mint: network.usdc }, network.id, options.fetcher)
+    : await confirmOnBase(transaction, sale, options.fetcher);
   if (!receipt.settled) {
-    console.log(pc.red(`\nx402-mqtt reported a payment that Base does not confirm: ${safe(receipt.reason ?? "unknown")}.`));
-    console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction) ?? safe(transaction)}\n`);
+    console.log(pc.red(`\nx402-mqtt reported a payment that ${network.name} does not confirm: ${safe(receipt.reason ?? "unknown")}.`));
+    console.log(`${pc.dim("tx")}  ${explorer(network.id, transaction) ?? safe(transaction)}\n`);
     return false;
   }
-  const paid = output.match(/paid \$[0-9.]+ · [^\n]*/)?.[0];
-  console.log(pc.green("\nFirst sale done on Base"));
-  if (paid) console.log(pc.dim(safe(paid).replace(/ · tx .*/, "")));
+  console.log(pc.green(`\nFirst sale done on ${network.name}`));
+  console.log(pc.dim(safe(`paid $${reported} · ${paid?.[2] ?? ""}`)));
   if (receipt.amount) {
     console.log(`${pc.dim("settled")}  ${formatUsdc(receipt.amount)} USDC from ${safe(receipt.payer ?? "")} to ${safe(receipt.payee ?? "")}`);
   }
-  console.log(`${pc.dim("tx")}  ${explorer("eip155:8453", transaction)}\n`);
+  console.log(`${pc.dim("tx")}  ${explorer(network.id, transaction)}\n`);
   return true;
 }
 
 export async function runHandshake(target: string, options: HandshakeOptions): Promise<boolean> {
+  if (/^https?:\/\//i.test(target) && options.network !== undefined) throw new Error("--network selects a machine payment network; HTTP payments use the endpoint's quote");
   return /^https?:\/\//i.test(target) ? handshakeHttp(target, options) : handshakeMqtt(target, options);
 }

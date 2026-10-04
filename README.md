@@ -27,10 +27,18 @@ cult handshake <url|topic>     # the first real sale, capped at $0.01
 ```
 
 - `cult build x402` sells on Base, Solana or both, and starts on testnet. Set `X402_NETWORK=mainnet` and your CDP keys to go live.
-- `cult build machine` runs on [x402-mqtt](https://github.com/thesmithdao/x402-mqtt).
+- `cult build machine` runs on [x402-mqtt 0.2.0](https://github.com/thesmithdao/x402-mqtt), with USDC on Base, Solana or both. Solana machines start on mainnet.
 - `cult check` reads the live 402 challenge: USDC, payout, price, Bazaar metadata and TLS. A Solana payout must have held USDC once, or payments to it fail, and `check` tells you.
 - `cult handshake` makes one capped purchase and prints the receipt. Marketplaces list a seller after its first settlement.
 - `cult` never holds a key. HTTP first sales are paid through Coinbase's [awal](https://docs.cdp.coinbase.com/agentic-wallet/cli/quickstart) wallet, offered at the moment you need it, and machine first sales use your own small buyer wallet through x402-mqtt.
+
+For a Solana machine:
+
+```bash
+cult build machine my-machine --device mac --network solana --payout <solana-address>
+```
+
+To accept both networks, use a Base `--payout` and add `--solana-payout <solana-address>`. Machine handshakes use the project's network by default; pass `--network solana` to buy from its Solana offer. Load the corresponding buyer key into `X402_MQTT_BUYER_KEY` and use a small spending cap. Solana payouts need an existing USDC account.
 
 ## The idea
 
